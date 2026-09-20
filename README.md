@@ -23,6 +23,7 @@ A report is never fabricated and never reported as trusted without that hardware
 | `GET`  | `/ping`                                | `200 pong`        | –                 | –             |
 | `GET`  | `/attestation-with-randomnumber?rn=<hex>` | `200 {"report":"<hex>"}` | `400 Bad Request` | `501` |
 | `POST` | `/verify-report`                       | `200 {"trusted":bool}` | `400 Bad Request` | `501` |
+| `POST` | `/parse-report`                        | `200 { ...decoded... }` | `400 Bad Request` | – |
 
 All error responses share one JSON envelope:
 
@@ -67,6 +68,39 @@ HTTP/1.1 200 OK
 {"trusted":false}    # tampered report
 ```
 
+### 4. `POST /parse-report`
+
+Request body:
+
+```json
+{ "report": "<tdx-report-hex>" }
+```
+
+Decodes a hex encoded `TDREPORT` into a **human readable JSON** document whose
+fields mirror the Intel TDX Module ABI `TDREPORT_STRUCT`.
+
+> This is a *parsing* endpoint only: it never verifies the report and never
+> claims it is authentic. Use `POST /verify-report` for that.
+
+```console
+$ curl -sS -X POST -H "Content-Type: application/json" \
+       -d '{"report":"<hex>"}' http://127.0.0.1:8080/parse-report | jq .
+{
+  "report_len": 1024,
+  "report_mac_struct": { "report_data": "...", "mac": "..." },
+  "tee_tcb_info": { "valid": 197119, "tee_tcb_svn": "...", "mrseam": "...",
+                    "mrsignerseam": "...", "seamattributes": 0,
+                    "tdattributes": 131334, "xfd": 0 },
+  "tdinfo": { "attributes": 268435456, "xfam": 393959, "mrtd": "...",
+              "mrconfigid": "...", "mrowner": "...", "mrownerconfig": "...",
+              "rtmr0": "...", "rtmr1": "...", "rtmr2": "...", "rtmr3": "...",
+              "servtd_hash": "..." }
+}
+```
+
+Errors: malformed JSON, non-hex `report`, or a report that is not 1024 bytes
+all yield `400 Bad Request`.
+
 ---
 
 ## How verification works (and why it needs a helper module)
@@ -95,13 +129,15 @@ workspace/
 ├── Cargo.toml            # Rocket 0.5 (json feature), serde, serde_json, hex, libc
 ├── Cargo.lock
 ├── Makefile              # build + test entry points
-├── README.md
+├── README.md             # English documentation
+├── README.zh.md          # Chinese documentation
 ├── .gitignore
 ├── src/
 │   ├── main.rs           # #[rocket::launch] entry point
 │   ├── lib.rs            # pub fn rocket() -> Rocket<Build>, re-exports
 │   ├── api.rs            # routes, payloads, ApiError, JSON catchers, unit tests
-│   └── attestation.rs    # generate_tdx_report / verify_tdx_report (+ hardware verify)
+│   ├── attestation.rs    # generate_tdx_report / verify_tdx_report (+ hardware verify)
+│   └── report.rs         # parse_tdreport: TDREPORT -> human readable JSON
 ├── kmod/
 │   ├── tdx_verify.c      # ring-0 TDCALL[TDG.MR.VERIFYREPORT] (leaf 22)
 │   ├── tdx_verify_uapi.h # userspace ABI of /dev/tdx_verify

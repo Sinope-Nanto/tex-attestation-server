@@ -241,6 +241,81 @@ fi
 echo
 
 # ---------------------------------------------------------------------------
+# 4b. parse report API - decode a report into human readable JSON
+# ---------------------------------------------------------------------------
+
+echo "== 4b. parse report API =="
+
+if [[ -z "$REPORT_HEX" ]]; then
+    bad "cannot test parsing without a report from step 2"
+else
+    status=$(curl -sS -o /tmp/w_parse.json -w '%{http_code}' --max-time 30 \
+        -X POST -H 'Content-Type: application/json' \
+        -d "{\"report\":\"$REPORT_HEX\"}" \
+        "$BASE_URL/parse-report")
+
+    if [[ "$status" == "200" ]]; then
+        ok "POST /parse-report -> 200"
+
+        # The decoded REPORTDATA must equal the nonce we bound the report to.
+        parsed_rd=$(jq -r '.report_mac_struct.report_data' /tmp/w_parse.json 2>/dev/null)
+        if [[ "$parsed_rd" == "$RN" ]]; then
+            ok "parsed report_mac_struct.report_data == the supplied rn"
+        else
+            bad "parsed report_data=$parsed_rd want $RN"
+        fi
+
+        # The MAC must be 32 bytes (64 hex chars).
+        mac=$(jq -r '.report_mac_struct.mac' /tmp/w_parse.json 2>/dev/null)
+        if [[ "${#mac}" == "64" ]]; then
+            ok "parsed report_mac_struct.mac is 32 bytes"
+        else
+            bad "parsed mac is ${#mac} hex chars (expected 64)"
+        fi
+
+        # MRTD must be 48 bytes (96 hex chars).
+        mrtd=$(jq -r '.tdinfo.mrtd' /tmp/w_parse.json 2>/dev/null)
+        if [[ "${#mrtd}" == "96" ]]; then
+            ok "parsed tdinfo.mrtd is 48 bytes"
+        else
+            bad "parsed mrtd is ${#mrtd} hex chars (expected 96)"
+        fi
+
+        # report_len must be 1024.
+        rlen=$(jq -r '.report_len' /tmp/w_parse.json 2>/dev/null)
+        if [[ "$rlen" == "1024" ]]; then
+            ok "parsed report_len == 1024"
+        else
+            bad "parsed report_len=$rlen (expected 1024)"
+        fi
+    else
+        bad "POST /parse-report -> $status $(cat /tmp/w_parse.json)"
+    fi
+fi
+
+# Non-hex report must be a 400.
+status=$(curl -sS -o /tmp/w_parse_bad.json -w '%{http_code}' --max-time 10 \
+    -X POST -H 'Content-Type: application/json' \
+    -d '{"report":"nothex"}' "$BASE_URL/parse-report")
+if [[ "$status" == "400" ]]; then
+    ok "parse-report non-hex report -> 400"
+else
+    bad "parse-report non-hex report -> $status (expected 400)"
+fi
+
+# Wrong length report must be a 400.
+status=$(curl -sS -o /tmp/w_parse_short.json -w '%{http_code}' --max-time 10 \
+    -X POST -H 'Content-Type: application/json' \
+    -d '{"report":"aabbccdd"}' "$BASE_URL/parse-report")
+if [[ "$status" == "400" ]]; then
+    ok "parse-report short report -> 400"
+else
+    bad "parse-report short report -> $status (expected 400)"
+fi
+
+echo
+
+# ---------------------------------------------------------------------------
 # 5. invalid requests must be 4xx (never 5xx, never a crash)
 # ---------------------------------------------------------------------------
 

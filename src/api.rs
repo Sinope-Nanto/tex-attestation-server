@@ -5,6 +5,7 @@
 //! | `GET`  | `/ping`                              | `200 pong`      | -             |
 //! | `GET`  | `/attestation-with-randomnumber?rn=` | `200 {report}`  | `400` / `501` |
 //! | `POST` | `/verify-report`                     | `200 {trusted}` | `400` / `501` |
+//! | `POST` | `/parse-report`                      | `200 {parsed}`  | `400`         |
 
 use std::fmt;
 
@@ -17,6 +18,7 @@ use rocket::serde::{Deserialize, Serialize};
 use rocket::{get, post};
 
 use crate::attestation::{generate_tdx_report, verify_tdx_report, AttestationError};
+use crate::report::{parse_tdreport, ParseReportRequest, ParseReportResponse};
 
 // ---------------------------------------------------------------------------
 // Payloads
@@ -191,6 +193,35 @@ pub fn verify_report(
 
     let trusted = verify_tdx_report(&report)?;
     Ok(Json(VerifyReportResponse { trusted }))
+}
+
+/// `POST /parse-report`
+///
+/// Request body: `{ "report": "<hex>" }`.
+///
+/// Decodes a hex encoded `TDREPORT` into a human readable JSON document. This
+/// is a *parsing* endpoint: it never verifies the report and never claims it
+/// is authentic. Use `POST /verify-report` for that.
+///
+/// * unreadable / non-JSON body -> `400 Bad Request`
+/// * `report` not hex           -> `400 Bad Request`
+/// * `report` not 1024 bytes    -> `400 Bad Request`
+/// * well-formed request        -> `200 { ...decoded fields... }`
+#[post("/parse-report", data = "<body>")]
+pub fn parse_report(
+    body: Result<String, std::io::Error>,
+) -> Result<Json<ParseReportResponse>, ApiError> {
+    let body = body.map_err(|err| ApiError::bad_request(format!("could not read body: {err}")))?;
+
+    let request: ParseReportRequest = serde_json::from_str(&body)
+        .map_err(|err| ApiError::bad_request(format!("invalid JSON body: {err}")))?;
+
+    let report = hex::decode(&request.report).map_err(|err| {
+        ApiError::bad_request(format!("'report' is not a valid hex string: {err}"))
+    })?;
+
+    let parsed = parse_tdreport(&report)?;
+    Ok(Json(parsed))
 }
 
 // ---------------------------------------------------------------------------

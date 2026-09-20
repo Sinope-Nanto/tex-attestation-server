@@ -18,10 +18,14 @@
 
 pub mod api;
 pub mod attestation;
+pub mod report;
 
 pub use api::{
-    attestation_with_random_number, ping, verify_report, ApiError, AttestationResponse,
-    ErrorResponse, VerifyReportRequest, VerifyReportResponse,
+    attestation_with_random_number, parse_report, ping, verify_report, ApiError,
+    AttestationResponse, ErrorResponse, VerifyReportRequest, VerifyReportResponse,
+};
+pub use report::{
+    parse_tdreport, ParseReportRequest, ParseReportResponse, ReportMacStruct, TdInfo, TeeTcbInfo,
 };
 pub use attestation::{
     generate_tdx_report, random_nonce, tdreport_reportdata, verify_tdx_report,
@@ -50,7 +54,12 @@ pub fn rocket() -> Rocket<Build> {
     rocket::build()
         .mount(
             "/",
-            rocket::routes![ping, attestation_with_random_number, verify_report],
+            rocket::routes![
+                ping,
+                attestation_with_random_number,
+                verify_report,
+                parse_report
+            ],
         )
         .register(
             "/",
