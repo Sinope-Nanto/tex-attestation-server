@@ -1,0 +1,29 @@
+[package]
+name = "tdx-attestation-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Rocket-based TDX attestation web service (generate/verify TDX reports)"
+license = "MIT"
+publish = false
+
+[lib]
+# This environment ships a rustdoc (1.75) that is out of sync with rustc
+# (1.89), so the doctest harness cannot even compile its own `--check-cfg`
+# invocation. The library's doc examples are `no_run` anyway; real coverage
+# lives in `cargo test`'s unit/integration tests and `tests/test_web_curl.sh`.
+doctest = false
+
+[dependencies]
+# Web framework. `json` enables `rocket::serde::json` (JSON request/response bodies).
+rocket = { version = "0.5", features = ["json"] }
+# (De)serialization of the JSON API payloads.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Hex encoding/decoding of the random number and the TDX report.
+hex = "0.4"
+# Raw ioctl(2) for the TDX guest driver and the TDG.MR.VERIFYREPORT helper.
+libc = "0.2"
+
+[dev-dependencies]
+# `rocket::local` (used by the integration tests) ships with rocket itself.

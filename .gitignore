@@ -1,0 +1,15 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Built kernel module objects (keep the sources, drop the build output)
+kmod/*.o
+kmod/*.ko
+kmod/*.mod
+kmod/*.mod.c
+kmod/.*.cmd
+kmod/Module.symvers
+kmod/modules.order
+
+# Compiled test binaries (rebuilt by the test commands)
+tests/test_tdx_hardware
