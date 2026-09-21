@@ -23,6 +23,15 @@
 //! PCR is always reset before it is extended, which keeps repeated measurements
 //! of the same folder deterministic.
 //!
+//! # Combined TPM + TDX attestation
+//!
+//! [`attestation_all`] runs the same TPM cycle and, in addition, asks the TDX
+//! module for a report bound to the *same* challenge. The two halves are returned
+//! together in the `evidence` block (`evidence.tpm` + `evidence.tdx`), and
+//! [`verify_all`] verifies both of them. Nothing is fabricated: if either backend
+//! is unavailable the whole request fails rather than returning a half-filled
+//! structure.
+//!
 //! # Folder measurement
 //!
 //! The reference `gpu-node` measures a *configured file list* with SM3 and a
@@ -61,6 +70,8 @@ use base64::Engine as _;
 use log::{debug, info, warn};
 use rocket::serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::attestation::{generate_tdx_report, verify_tdx_report, AttestationError};
 
 // ---------------------------------------------------------------------------
 // Defaults and configuration names
@@ -247,6 +258,20 @@ impl fmt::Display for TpmError {
 
 impl std::error::Error for TpmError {}
 
+impl From<AttestationError> for TpmError {
+    /// Maps a TDX backend failure onto the TPM error taxonomy so that the
+    /// combined endpoints can report both halves through one error type.
+    fn from(err: AttestationError) -> Self {
+        match err {
+            AttestationError::NotImplemented => TpmError::NotImplemented(
+                "TDX attestation is not implemented on this host".to_string(),
+            ),
+            AttestationError::InvalidInput(msg) => TpmError::InvalidInput(msg),
+            AttestationError::Internal(msg) => TpmError::Internal(msg),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Payloads
 // ---------------------------------------------------------------------------
@@ -398,11 +423,32 @@ pub struct TpmEvidence {
     pub ak_handle: String,
 }
 
+/// TDX evidence carried inside the combined `evidence` block.
+///
+/// Only the combined `/attestation_all` response fills this in; `/quote_tpm`
+/// leaves the `tdx` field out entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TdxEvidence {
+    /// The TDX report, hex encoded (1024 bytes -> 2048 hex chars).
+    pub report: String,
+    /// The challenge the report is bound to, hex encoded (lowercase).
+    pub nonce: String,
+    /// Length of the challenge in bytes.
+    pub nonce_size: usize,
+}
+
 /// `evidence` wrapper of [`QuoteTpmResponse`], mirroring `gpu-node`.
+///
+/// The `tdx` field is only present on the combined `/attestation_all` response;
+/// `/quote_tpm` serialises the block without it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuoteEvidence {
     /// The TPM evidence.
     pub tpm: TpmEvidence,
+    /// The TDX evidence, present only on the combined `/attestation_all`
+    /// response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tdx: Option<TdxEvidence>,
 }
 
 /// Successful response of `POST /quote_tpm`.
@@ -422,6 +468,39 @@ pub struct QuoteTpmResponse {
     pub evidence: QuoteEvidence,
     /// Public part of the Attestation Key, PEM encoded (best effort).
     pub ak_pubkey: String,
+}
+
+/// Successful response of `POST /attestation_all`.
+///
+/// Same shape as [`QuoteTpmResponse`], except that the `evidence` block carries
+/// *both* the TPM quote and the TDX report, bound to the same challenge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttestationAllResponse {
+    /// `gpu-node` status code; always [`RC_SUCCESS`] on an HTTP 200.
+    pub status: u32,
+    /// The folder measurement the PCR was extended with.
+    pub measurement: TpmMeasurement,
+    /// The PCR value after `PCR_Reset` + `PCR_Extend`, hex encoded.
+    pub pcr_value: String,
+    /// The PCR index the quote covers.
+    pub pcr_index: u32,
+    /// The hash bank the quote covers.
+    pub hash_algorithm: String,
+    /// The combined evidence: TPM quote plus TDX report.
+    pub evidence: QuoteEvidence,
+    /// Public part of the Attestation Key, PEM encoded (best effort).
+    pub ak_pubkey: String,
+}
+
+/// Successful response of `POST /verify_all`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyAllResponse {
+    /// Whether the whole structure verified (both halves trusted).
+    pub trusted: bool,
+    /// Whether the TPM quote verified against the Attestation Key.
+    pub tpm_trusted: bool,
+    /// Whether the TDX report was accepted by the TDX module.
+    pub tdx_trusted: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,9 +1179,219 @@ pub fn quote_tpm(state: &TpmState, nonce_hex: &str) -> Result<QuoteTpmResponse, 
         pcr_value,
         pcr_index: config.pcr_index,
         hash_algorithm: config.hash_algorithm.clone(),
-        evidence: QuoteEvidence { tpm: evidence },
+        evidence: QuoteEvidence {
+            tpm: evidence,
+            tdx: None,
+        },
         ak_pubkey,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Combined TPM + TDX attestation
+// ---------------------------------------------------------------------------
+
+/// `POST /attestation_all` backend logic.
+///
+/// Runs the same reset/measure/extend/read/quote cycle as [`quote_tpm`] and, in
+/// addition, asks the TDX module for a report bound to the *same* challenge.
+/// The two halves are returned together in the `evidence` block: `evidence.tpm`
+/// carries the TPM quote, `evidence.tdx` carries the TDX report.
+///
+/// Nothing is fabricated: the TPM quote comes from the TPM and the TDX report
+/// comes from the TDX module. If either backend is unavailable the whole request
+/// fails with [`TpmError::NotImplemented`] (`501`) rather than returning a
+/// half-filled structure.
+///
+/// # Errors
+///
+/// * [`TpmError::InvalidInput`] - `nonce_hex` is not a usable challenge.
+/// * [`TpmError::NotImplemented`] - the TPM simulator or the TDX guest driver
+///   is not reachable.
+/// * [`TpmError::Internal`] - the measurement, a PCR operation, the quote or the
+///   TDX report generation failed.
+pub fn attestation_all(
+    state: &TpmState,
+    nonce_hex: &str,
+) -> Result<AttestationAllResponse, TpmError> {
+    let (nonce, nonce_size) = normalize_nonce(nonce_hex)?;
+
+    let mut inner = state.lock();
+    let config = state.config();
+    let scratch = Scratch::new()?;
+
+    let (measurement, pcr_value) = measure_and_extend(config, &scratch)?;
+
+    info!(
+        "combined attestation: TPM quote start ak={} pcr={} challenge_bytes={}",
+        config.ak_handle, config.pcr_index, nonce_size
+    );
+    ensure_ak(config, &scratch)?;
+    let (tpm_evidence, _) = create_quote(config, &nonce, &scratch)?;
+
+    // The TDX report is bound to the very same challenge: the nonce is decoded
+    // from its canonical hex form and zero-padded to REPORTDATA by the backend.
+    let nonce_bytes = hex::decode(&nonce)
+        .map_err(|err| TpmError::InvalidInput(format!("the nonce is not valid hex: {err}")))?;
+    info!(
+        "combined attestation: TDX report start challenge_bytes={}",
+        nonce_bytes.len()
+    );
+    let report = generate_tdx_report(&nonce_bytes)?;
+    info!(
+        "combined attestation: TDX report completed report_bytes={}",
+        report.len()
+    );
+
+    let tdx_evidence = TdxEvidence {
+        report: hex::encode(&report),
+        nonce: nonce.clone(),
+        nonce_size,
+    };
+
+    let ak_pubkey = ak_pubkey(config, &mut inner, &scratch).unwrap_or_else(|err| {
+        warn!("Attestation Key public part is unavailable: {err}");
+        String::new()
+    });
+
+    Ok(AttestationAllResponse {
+        status: RC_SUCCESS,
+        measurement: measurement.as_tpm_measurement(),
+        pcr_value,
+        pcr_index: config.pcr_index,
+        hash_algorithm: config.hash_algorithm.clone(),
+        evidence: QuoteEvidence {
+            tpm: tpm_evidence,
+            tdx: Some(tdx_evidence),
+        },
+        ak_pubkey,
+    })
+}
+
+/// `POST /verify_all` backend logic.
+///
+/// Verifies the structure produced by [`attestation_all`]:
+///
+/// * the TDX report is handed to the TDX module
+///   ([`verify_tdx_report`], `TDCALL[TDG.MR.VERIFYREPORT]`);
+/// * the TPM quote is checked against the Attestation Key public part carried by
+///   the same structure (`tpm2_checkquote`).
+///
+/// The result is `trusted` only when *both* halves verify. A missing `tdx`
+/// field, a malformed blob or a rejected signature all yield `trusted=false`;
+/// only a backend that cannot be reached at all is an error.
+///
+/// # Errors
+///
+/// * [`TpmError::InvalidInput`] - the structure is malformed (missing `tdx`,
+///   non-hex report, undecodable blobs).
+/// * [`TpmError::NotImplemented`] - the TDX verifier or `tpm2_checkquote` is not
+///   available.
+pub fn verify_all(
+    state: &TpmState,
+    request: &AttestationAllResponse,
+) -> Result<VerifyAllResponse, TpmError> {
+    let tdx = request.evidence.tdx.as_ref().ok_or_else(|| {
+        TpmError::InvalidInput("the evidence block has no 'tdx' field".to_string())
+    })?;
+
+    let report = hex::decode(&tdx.report).map_err(|err| {
+        TpmError::InvalidInput(format!("'evidence.tdx.report' is not valid hex: {err}"))
+    })?;
+    let tdx_trusted = verify_tdx_report(&report)?;
+
+    let tpm_trusted = verify_quote(state, request)?;
+
+    Ok(VerifyAllResponse {
+        trusted: tpm_trusted && tdx_trusted,
+        tpm_trusted,
+        tdx_trusted,
+    })
+}
+
+/// Verifies the TPM quote of a combined structure with `tpm2_checkquote`.
+///
+/// The quote blobs are `base64(hex(bytes))` on the wire; they are decoded back
+/// to raw `TPMT_SIGNATURE` / `TPMS_ATTEST` and checked against the Attestation
+/// Key public part and the challenge carried by the same structure.
+///
+/// A quote that simply does not verify is `Ok(false)`; only a missing tool is an
+/// error.
+fn verify_quote(state: &TpmState, request: &AttestationAllResponse) -> Result<bool, TpmError> {
+    let config = state.config();
+    let scratch = Scratch::new()?;
+
+    let evidence = &request.evidence.tpm;
+
+    let signature = decode_blob(&evidence.signature)?;
+    let message = decode_blob(&evidence.message)?;
+
+    let sig_path = scratch.arg("verify.sig")?;
+    let msg_path = scratch.arg("verify.msg")?;
+    let ak_path = scratch.arg("verify.ak.pem")?;
+
+    fs::write(&sig_path, &signature)
+        .map_err(|err| TpmError::Internal(format!("quote signature cannot be written: {err}")))?;
+    fs::write(&msg_path, &message)
+        .map_err(|err| TpmError::Internal(format!("quote message cannot be written: {err}")))?;
+    fs::write(&ak_path, request.ak_pubkey.as_bytes()).map_err(|err| {
+        TpmError::Internal(format!(
+            "Attestation Key public part cannot be written: {err}"
+        ))
+    })?;
+
+    // `tpm2_checkquote` is an offline verifier: it does not talk to a TPM and
+    // rejects the `--tcti` option, so it is invoked without one.
+    let binary = "tpm2_checkquote";
+    let output = match Command::new(binary)
+        .args([
+            "-u",
+            &ak_path,
+            "-g",
+            &evidence.hash_algorithm,
+            "-m",
+            &msg_path,
+            "-s",
+            &sig_path,
+            "-q",
+            &evidence.nonce,
+        ])
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(TpmError::NotImplemented(format!(
+                "`{binary}` was not found; install tpm2-tools to verify TPM quotes"
+            )));
+        }
+        Err(err) => {
+            return Err(TpmError::Internal(format!(
+                "`{binary}` could not be executed: {err}"
+            )));
+        }
+    };
+
+    if output.status.success() {
+        return Ok(true);
+    }
+
+    debug!(
+        "{binary} rejected the quote (tcti={}): {}",
+        config.tcti,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(false)
+}
+
+/// Decodes a `base64(hex(bytes))` blob back to its raw bytes.
+fn decode_blob(value: &str) -> Result<Vec<u8>, TpmError> {
+    let inner = BASE64
+        .decode(value.trim())
+        .map_err(|err| TpmError::InvalidInput(format!("blob is not valid base64: {err}")))?;
+    let hex_str = String::from_utf8(inner)
+        .map_err(|err| TpmError::InvalidInput(format!("blob is not valid UTF-8: {err}")))?;
+    hex::decode(hex_str.trim())
+        .map_err(|err| TpmError::InvalidInput(format!("blob is not valid hex: {err}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -1438,5 +1727,88 @@ mod tests {
         assert_eq!(&stamp[4..5], ".");
         assert_eq!(&stamp[7..8], ".");
         assert_eq!(&stamp[10..11], " ");
+    }
+
+    /// A `base64(hex(bytes))` blob round-trips through `decode_blob`.
+    #[test]
+    fn decode_blob_round_trips() {
+        let raw = vec![0x00u8, 0x01, 0xfe, 0xff, 0x42];
+        let encoded = BASE64.encode(hex::encode(&raw).as_bytes());
+        assert_eq!(decode_blob(&encoded).unwrap(), raw);
+    }
+
+    /// A blob that is not base64, or whose inner text is not hex, is a client
+    /// error - never a panic.
+    #[test]
+    fn decode_blob_rejects_malformed_input() {
+        assert!(matches!(
+            decode_blob("not base64!!"),
+            Err(TpmError::InvalidInput(_))
+        ));
+        // Valid base64, but the inner text is not hex.
+        let not_hex = BASE64.encode(b"zzzz");
+        assert!(matches!(
+            decode_blob(&not_hex),
+            Err(TpmError::InvalidInput(_))
+        ));
+    }
+
+    /// The combined evidence block serialises `tdx` only when it is present.
+    #[test]
+    fn quote_evidence_omits_absent_tdx() {
+        let tpm = TpmEvidence {
+            quote: "a:b:c".to_string(),
+            quote_size: 5,
+            signature: "sig".to_string(),
+            message: "msg".to_string(),
+            pcrs: "pcrs".to_string(),
+            signature_size: 3,
+            message_size: 3,
+            nonce: "aabb".to_string(),
+            nonce_size: 2,
+            pcr_index: 16,
+            hash_algorithm: "sha256".to_string(),
+            ak_handle: "0x81010002".to_string(),
+        };
+
+        let without = serde_json::to_value(QuoteEvidence {
+            tpm: tpm.clone(),
+            tdx: None,
+        })
+        .unwrap();
+        assert!(
+            without.get("tdx").is_none(),
+            "an absent tdx field must not be serialised: {without}"
+        );
+
+        let with = serde_json::to_value(QuoteEvidence {
+            tpm,
+            tdx: Some(TdxEvidence {
+                report: "deadbeef".to_string(),
+                nonce: "aabb".to_string(),
+                nonce_size: 2,
+            }),
+        })
+        .unwrap();
+        assert_eq!(with["tdx"]["report"], "deadbeef");
+        assert_eq!(with["tdx"]["nonce_size"], 2);
+    }
+
+    /// A TDX backend failure is mapped onto the TPM error taxonomy so the
+    /// combined endpoints can report both halves through one error type.
+    #[test]
+    fn attestation_errors_map_onto_tpm_errors() {
+        assert!(matches!(
+            TpmError::from(AttestationError::NotImplemented),
+            TpmError::NotImplemented(_)
+        ));
+        assert_eq!(
+            TpmError::from(AttestationError::InvalidInput("bad".into())),
+            TpmError::InvalidInput("bad".into())
+        );
+        assert_eq!(
+            TpmError::from(AttestationError::Internal("boom".into())),
+            TpmError::Internal("boom".into())
+        );
     }
 }

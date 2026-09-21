@@ -23,8 +23,9 @@ pub mod report;
 pub mod tpm;
 
 pub use api::{
-    attestation_with_random_number, information_tpm, parse_report, ping, quote_tpm, verify_report,
-    ApiError, AttestationResponse, ErrorResponse, VerifyReportRequest, VerifyReportResponse,
+    attestation_all, attestation_with_random_number, information_tpm, parse_report, ping,
+    quote_tpm, verify_all, verify_report, ApiError, AttestationResponse, ErrorResponse,
+    VerifyReportRequest, VerifyReportResponse,
 };
 pub use attestation::{
     generate_tdx_report, random_nonce, tdreport_reportdata, verify_tdx_report,
@@ -36,12 +37,13 @@ pub use report::{
     parse_tdreport, ParseReportRequest, ParseReportResponse, ReportMacStruct, TdInfo, TeeTcbInfo,
 };
 pub use tpm::{
-    measure_folder, normalize_nonce, FolderMeasurement, InformationTpmResponse, MeasuredFile,
-    QuoteTpmRequest, QuoteTpmResponse, TpmConfig, TpmError, TpmEvidence, TpmMeasurement, TpmState,
-    BACKEND_NAME, DEFAULT_AK_HANDLE, DEFAULT_HASH_ALGORITHM, DEFAULT_PCR_INDEX,
-    DEFAULT_SIMULATOR_DIR, DEFAULT_TCTI, ENV_AK_HANDLE, ENV_HASH_ALGORITHM, ENV_MEASURE_DIR,
-    ENV_PCR_INDEX, ENV_SIMULATOR_DIR, ENV_TCTI, MAX_QUALIFYING_DATA_LEN, RC_MEASURE_FAIL,
-    RC_QUOTE_FAIL, RC_REQUEST_ERROR, RC_SUCCESS,
+    measure_folder, normalize_nonce, AttestationAllResponse, FolderMeasurement,
+    InformationTpmResponse, MeasuredFile, QuoteTpmRequest, QuoteTpmResponse, TdxEvidence,
+    TpmConfig, TpmError, TpmEvidence, TpmMeasurement, TpmState, VerifyAllResponse, BACKEND_NAME,
+    DEFAULT_AK_HANDLE, DEFAULT_HASH_ALGORITHM, DEFAULT_PCR_INDEX, DEFAULT_SIMULATOR_DIR,
+    DEFAULT_TCTI, ENV_AK_HANDLE, ENV_HASH_ALGORITHM, ENV_MEASURE_DIR, ENV_PCR_INDEX,
+    ENV_SIMULATOR_DIR, ENV_TCTI, MAX_QUALIFYING_DATA_LEN, RC_MEASURE_FAIL, RC_QUOTE_FAIL,
+    RC_REQUEST_ERROR, RC_SUCCESS,
 };
 
 use rocket::{Build, Rocket};
@@ -72,7 +74,13 @@ pub fn rocket() -> Rocket<Build> {
 
     let tpm_state = tpm::TpmState::from_env();
 
-    rocket::build()
+    // `/verify_all` receives a whole combined attestation structure: a 1024-byte
+    // TDX report (2048 hex chars) plus the base64(hex(..)) TPM quote blobs, which
+    // is well over Rocket's 8 KiB default `string` limit. Raise it so the
+    // structure can be posted back verbatim; every other route is unaffected.
+    let figment = rocket::Config::figment().merge(("limits.string", 2 * 1024 * 1024));
+
+    rocket::custom(figment)
         .attach(logging::RequestLogger)
         .manage(tpm_state)
         .mount(
@@ -83,7 +91,9 @@ pub fn rocket() -> Rocket<Build> {
                 verify_report,
                 parse_report,
                 information_tpm,
-                quote_tpm
+                quote_tpm,
+                attestation_all,
+                verify_all
             ],
         )
         .register(

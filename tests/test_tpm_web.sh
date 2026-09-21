@@ -633,6 +633,146 @@ fi
 
 echo
 
+# ---------------------------------------------------------------------------
+# 8. Combined TPM + TDX attestation: /attestation_all and /verify_all
+# ---------------------------------------------------------------------------
+#
+# `/attestation_all` returns the `/quote_tpm` structure with an extra
+# `evidence.tdx` block carrying a TDX report bound to the same challenge.
+# `/verify_all` takes that exact structure back and verifies both halves.
+
+echo "== 8. combined /attestation_all + /verify_all =="
+
+ALL_NONCE=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+status=$(curl -sS -o /tmp/tpm_all.json -w '%{http_code}' --max-time 90 \
+    -X POST -H 'Content-Type: application/json' \
+    -d "{\"nonce\":\"$ALL_NONCE\"}" \
+    "$BASE_URL/attestation_all")
+
+ALL_OK=0
+if [[ "$status" == "200" ]]; then
+    ALL_OK=1
+    ok "POST /attestation_all -> 200"
+elif [[ "$status" == "501" ]]; then
+    info "POST /attestation_all -> 501 (TPM or TDX backend unavailable here)"
+else
+    bad "POST /attestation_all -> $status $(cat /tmp/tpm_all.json)"
+fi
+
+if [[ "$ALL_OK" == "1" ]]; then
+    # The evidence block must carry both halves.
+    if jq -e '.evidence.tpm and .evidence.tdx' /tmp/tpm_all.json >/dev/null 2>&1; then
+        ok "evidence carries both 'tpm' and 'tdx'"
+    else
+        bad "evidence is missing one of 'tpm'/'tdx': $(jq -c '.evidence|keys' /tmp/tpm_all.json)"
+    fi
+
+    # The TDX report must be a 1024-byte report bound to the same challenge.
+    all_report=$(read_json /tmp/tpm_all.json '.evidence.tdx.report')
+    all_tdx_nonce=$(read_json /tmp/tpm_all.json '.evidence.tdx.nonce')
+    all_tpm_nonce=$(read_json /tmp/tpm_all.json '.evidence.tpm.nonce')
+
+    if [[ "${#all_report}" == "2048" ]]; then
+        ok "evidence.tdx.report is a 1024-byte TDX report"
+    else
+        bad "evidence.tdx.report is ${#all_report} hex chars (expected 2048)"
+    fi
+
+    all_rd_prefix=$(printf '%s' "$all_report" | cut -c257-320)
+    if [[ "$all_rd_prefix" == "$ALL_NONCE" ]]; then
+        ok "the TDX report binds REPORTDATA to the supplied challenge"
+    else
+        bad "the TDX report does not bind REPORTDATA to the challenge"
+    fi
+
+    if [[ "$all_tdx_nonce" == "$ALL_NONCE" && "$all_tpm_nonce" == "$ALL_NONCE" ]]; then
+        ok "both halves are bound to the same challenge"
+    else
+        bad "challenge mismatch: tdx='$all_tdx_nonce' tpm='$all_tpm_nonce' want '$ALL_NONCE'"
+    fi
+
+    # The whole structure must verify.
+    status=$(curl -sS -o /tmp/tpm_verify_all.json -w '%{http_code}' --max-time 90 \
+        -X POST -H 'Content-Type: application/json' \
+        --data-binary @/tmp/tpm_all.json \
+        "$BASE_URL/verify_all")
+
+    if [[ "$status" == "200" ]]; then
+        trusted=$(read_json /tmp/tpm_verify_all.json '.trusted')
+        tpm_trusted=$(read_json /tmp/tpm_verify_all.json '.tpm_trusted')
+        tdx_trusted=$(read_json /tmp/tpm_verify_all.json '.tdx_trusted')
+        if [[ "$trusted" == "true" && "$tpm_trusted" == "true" && "$tdx_trusted" == "true" ]]; then
+            ok "POST /verify_all -> 200 trusted=true (tpm+tdx)"
+        else
+            bad "POST /verify_all -> trusted=$trusted tpm=$tpm_trusted tdx=$tdx_trusted"
+        fi
+    else
+        bad "POST /verify_all -> $status $(cat /tmp/tpm_verify_all.json)"
+    fi
+
+    # A tampered TDX report must be rejected, while the TPM half stays trusted.
+    python3 - /tmp/tpm_all.json /tmp/tpm_all_tampered_tdx.json <<'PY'
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+with open(src) as fh:
+    doc = json.load(fh)
+report = doc["evidence"]["tdx"]["report"]
+flipped = "%02x" % (int(report[256:258], 16) ^ 0x01)
+doc["evidence"]["tdx"]["report"] = report[:256] + flipped + report[258:]
+with open(dst, "w") as fh:
+    json.dump(doc, fh)
+PY
+
+    status=$(curl -sS -o /tmp/tpm_verify_tdx.json -w '%{http_code}' --max-time 90 \
+        -X POST -H 'Content-Type: application/json' \
+        --data-binary @/tmp/tpm_all_tampered_tdx.json \
+        "$BASE_URL/verify_all")
+    if [[ "$status" == "200" ]]; then
+        trusted=$(read_json /tmp/tpm_verify_tdx.json '.trusted')
+        tdx_trusted=$(read_json /tmp/tpm_verify_tdx.json '.tdx_trusted')
+        if [[ "$trusted" == "false" && "$tdx_trusted" == "false" ]]; then
+            ok "a tampered TDX report -> trusted=false, tdx_trusted=false"
+        else
+            bad "tampered TDX report -> trusted=$trusted tdx_trusted=$tdx_trusted"
+        fi
+    else
+        bad "tampered TDX report -> $status $(cat /tmp/tpm_verify_tdx.json)"
+    fi
+
+    # A structure without the tdx field is a client error, not a silent false.
+    jq 'del(.evidence.tdx)' /tmp/tpm_all.json >/tmp/tpm_all_no_tdx.json
+    status=$(curl -sS -o /tmp/tpm_verify_notdx.json -w '%{http_code}' --max-time 30 \
+        -X POST -H 'Content-Type: application/json' \
+        --data-binary @/tmp/tpm_all_no_tdx.json \
+        "$BASE_URL/verify_all")
+    if [[ "$status" == "400" ]] && grep -q '"error"' /tmp/tpm_verify_notdx.json; then
+        ok "a structure without 'tdx' -> 400 with the error envelope"
+    else
+        bad "a structure without 'tdx' -> $status $(cat /tmp/tpm_verify_notdx.json)"
+    fi
+fi
+
+# Malformed requests must be 4xx, never 5xx.
+status=$(curl -sS -o /tmp/tpm_all_bad.json -w '%{http_code}' --max-time 15 \
+    -X POST -H 'Content-Type: application/json' -d '{"nonce":"nothex"}' \
+    "$BASE_URL/attestation_all")
+if [[ "$status" == "400" ]]; then
+    ok "attestation_all non-hex nonce -> 400"
+else
+    bad "attestation_all non-hex nonce -> $status (expected 400)"
+fi
+
+status=$(curl -sS -o /tmp/tpm_verify_bad.json -w '%{http_code}' --max-time 15 \
+    -X POST -H 'Content-Type: application/json' -d 'this-is-not-json' \
+    "$BASE_URL/verify_all")
+if [[ "$status" == "400" ]]; then
+    ok "verify_all malformed body -> 400"
+else
+    bad "verify_all malformed body -> $status (expected 400)"
+fi
+
+echo
+
 if [[ "$FAIL" -eq 0 ]]; then
     printf 'TPM web test: PASSED (%d checks)\n' "$PASS"
     exit 0

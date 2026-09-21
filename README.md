@@ -26,9 +26,14 @@ A report is never fabricated and never reported as trusted without that hardware
 | `POST` | `/parse-report`                        | `200 { ...decoded... }` | `400 Bad Request` | – |
 | `GET`  | `/information_tpm`                     | `200 { ...measurement... }` | `400 Bad Request` | `501` |
 | `POST` | `/quote_tpm`                           | `200 { ...quote... }` | `400 Bad Request` | `501` |
+| `POST` | `/attestation_all`                     | `200 { ...tpm+tdx... }` | `400 Bad Request` | `501` |
+| `POST` | `/verify_all`                          | `200 {"trusted":bool,...}` | `400 Bad Request` | `501` |
 
-The last two rows are the **TPM** endpoints; see
-[TPM Simulator Attestation](#tpm-simulator-attestation).
+The `/information_tpm` and `/quote_tpm` rows are the **TPM** endpoints; see
+[TPM Simulator Attestation](#tpm-simulator-attestation). The last two rows are
+the **combined** endpoints, which return and verify a TPM quote *and* a TDX
+report bound to the same challenge; see
+[Combined TPM + TDX attestation](#combined-tpm--tdx-attestation).
 
 All error responses share one JSON envelope:
 
@@ -157,7 +162,8 @@ workspace/
     ├── test_tdx_hardware        # compiled test binary
     ├── test_web_curl.sh         # end-to-end curl test of the TDX endpoints
     ├── test_tpm_integration.sh  # real simulator: measure, PCR, quote, verify
-    ├── test_tpm_web.sh          # end-to-end curl test of the TPM endpoints
+    ├── test_tpm_web.sh          # end-to-end curl test of the TPM + combined endpoints
+    ├── test_attestation_all.rs  # combined /attestation_all + /verify_all validation
     └── test_logging.rs          # audit log: events, error quoting, panic capture
 ```
 
@@ -469,6 +475,75 @@ $ tpm2_checkquote -u ak.pem -g sha256 -m quote.msg -s quote.sig -q "$NONCE"
 This is exactly what `tests/test_tpm_web.sh` does: it rejects a fabricated quote
 and rejects a quote presented together with the *wrong* challenge.
 
+---
+
+## Combined TPM + TDX attestation
+
+The two attestation backends can be used **together**: `POST /attestation_all`
+returns the `/quote_tpm` structure with an extra `evidence.tdx` block, and
+`POST /verify_all` takes that exact structure back and verifies both halves.
+
+Both halves are bound to the **same challenge**, so a verifier can check that a
+single nonce was attested by the TPM *and* by the TDX module.
+
+### `POST /attestation_all`
+
+Request body: identical to `/quote_tpm` (`nonce` / `challenge`, hex encoded).
+
+```console
+$ NONCE=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+$ curl -sS -X POST -H 'Content-Type: application/json' \
+       -d "{\"nonce\":\"$NONCE\"}" \
+       http://127.0.0.1:8080/attestation_all | jq .
+{
+  "status": 0,
+  "measurement": { ... },
+  "pcr_value": "9f2dbe61...",
+  "pcr_index": 16,
+  "hash_algorithm": "sha256",
+  "evidence": {
+    "tpm": { ...same as /quote_tpm... },
+    "tdx": {
+      "report": "<2048 hex chars, 1024-byte TDREPORT>",
+      "nonce": "f0e1d2c3...",
+      "nonce_size": 32
+    }
+  },
+  "ak_pubkey": "-----BEGIN PUBLIC KEY-----\n..."
+}
+```
+
+* `evidence.tpm` is exactly what `/quote_tpm` returns.
+* `evidence.tdx.report` is a genuine `TDREPORT` produced by the TDX module
+  (`/dev/tdx_guest`), with `REPORTDATA` seeded from the same challenge.
+* If **either** backend is unavailable the whole request answers `501` - the
+  structure is never returned half-filled.
+
+### `POST /verify_all`
+
+Request body: the exact structure returned by `/attestation_all`.
+
+```console
+$ curl -sS -X POST -H 'Content-Type: application/json' \
+       --data-binary @all.json \
+       http://127.0.0.1:8080/verify_all | jq .
+{
+  "trusted": true,
+  "tpm_trusted": true,
+  "tdx_trusted": true
+}
+```
+
+* `tdx_trusted` comes from the TDX module itself
+  (`TDCALL[TDG.MR.VERIFYREPORT]`, see [How verification works](#how-verification-works-and-why-it-needs-a-helper-module)).
+* `tpm_trusted` comes from `tpm2_checkquote`, run against the Attestation Key
+  public part carried by the same structure.
+* `trusted` is `true` only when **both** halves verify. A tampered TDX report or a
+  tampered TPM signature yields `trusted=false` with the corresponding flag set
+  to `false`.
+* A structure without the `tdx` field, or with a non-hex report, is a
+  `400 Bad Request` - never a silent `trusted=false`.
+
 ### Running
 
 ```console
@@ -510,7 +585,11 @@ among other things:
   `{"nonce":"abc"}`, a 65-byte nonce, conflicting `nonce`/`challenge`, a
   non-JSON body) is a `400` with the `{"error":...}` envelope;
 * the original TDX endpoints (`/ping`, `/attestation-with-randomnumber`,
-  `/verify-report`, `/parse-report`) still behave as before.
+  `/verify-report`, `/parse-report`) still behave as before;
+* `/attestation_all` returns both `evidence.tpm` and `evidence.tdx`, with the TDX
+  report bound to the same challenge, and `/verify_all` accepts the structure
+  (`trusted=true`), rejects a tampered TDX report (`tdx_trusted=false`) and
+  answers `400` for a structure without the `tdx` field.
 
 ### Troubleshooting
 

@@ -38,7 +38,7 @@ test-web:
 test-tpm:
 	bash tests/test_tpm_integration.sh
 
-# curl(1) end-to-end test of the /information_tpm and /quote_tpm endpoints.
+# curl(1) end-to-end test of the TPM and combined attestation endpoints.
 test-tpm-web:
 	WEB_BASE_URL=$(WEB_BASE_URL) bash tests/test_tpm_web.sh
 

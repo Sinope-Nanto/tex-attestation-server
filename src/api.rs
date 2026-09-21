@@ -8,6 +8,8 @@
 //! | `POST` | `/parse-report`                      | `200 {parsed}`  | `400`         |
 //! | `GET`  | `/information_tpm`                   | `200 {info}`    | `400` / `501` |
 //! | `POST` | `/quote_tpm`                         | `200 {quote}`   | `400` / `501` |
+//! | `POST` | `/attestation_all`                   | `200 {all}`     | `400` / `501` |
+//! | `POST` | `/verify_all`                        | `200 {trusted}` | `400` / `501` |
 //!
 //! The two `*_tpm` routes talk to a TPM 2.0 device (the simulator in
 //! `tpm-simu/`) through [`crate::tpm`]; they never interfere with the TDX routes
@@ -26,7 +28,8 @@ use rocket::{get, post, State};
 use crate::attestation::{generate_tdx_report, verify_tdx_report, AttestationError};
 use crate::report::{parse_tdreport, ParseReportRequest, ParseReportResponse};
 use crate::tpm::{
-    self, InformationTpmResponse, QuoteTpmRequest, QuoteTpmResponse, TpmError, TpmState,
+    self, AttestationAllResponse, InformationTpmResponse, QuoteTpmRequest, QuoteTpmResponse,
+    TpmError, TpmState, VerifyAllResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -308,6 +311,66 @@ pub fn quote_tpm(
 
     let nonce = request.resolved_nonce()?;
     let response = tpm::quote_tpm(state.inner(), &nonce)?;
+    Ok(Json(response))
+}
+
+/// `POST /attestation_all`
+///
+/// Request body (`gpu-node` compatible, same as `/quote_tpm`):
+///
+/// ```json
+/// { "nonce": "<hex>", "nonce_size": 32, "mask": "..." }
+/// ```
+///
+/// Runs the TPM quote cycle and, in addition, asks the TDX module for a report
+/// bound to the *same* challenge. The response has the shape of `/quote_tpm`,
+/// but its `evidence` block carries both halves:
+///
+/// ```json
+/// { "evidence": { "tpm": { ... }, "tdx": { "report": "<hex>", ... } } }
+/// ```
+///
+/// * unreadable / non-JSON body        -> `400 Bad Request`
+/// * missing / non-hex / oversized     -> `400 Bad Request`
+/// * TPM simulator or TDX unavailable  -> `501 Not Implemented`
+/// * otherwise                         -> `200 { ... }`
+#[post("/attestation_all", data = "<body>")]
+pub fn attestation_all(
+    state: &State<TpmState>,
+    body: Result<String, std::io::Error>,
+) -> Result<Json<AttestationAllResponse>, ApiError> {
+    let body = body.map_err(|err| ApiError::bad_request(format!("could not read body: {err}")))?;
+
+    let request: QuoteTpmRequest = serde_json::from_str(&body)
+        .map_err(|err| ApiError::bad_request(format!("invalid JSON body: {err}")))?;
+
+    let nonce = request.resolved_nonce()?;
+    let response = tpm::attestation_all(state.inner(), &nonce)?;
+    Ok(Json(response))
+}
+
+/// `POST /verify_all`
+///
+/// Request body: the exact structure returned by `POST /attestation_all`.
+///
+/// Verifies both halves of the structure: the TDX report with the TDX module
+/// and the TPM quote against the Attestation Key public part it carries.
+///
+/// * unreadable / non-JSON body        -> `400 Bad Request`
+/// * missing `tdx` / malformed blobs   -> `400 Bad Request`
+/// * TDX verifier or tpm2-tools absent -> `501 Not Implemented`
+/// * otherwise                         -> `200 { "trusted": bool, ... }`
+#[post("/verify_all", data = "<body>")]
+pub fn verify_all(
+    state: &State<TpmState>,
+    body: Result<String, std::io::Error>,
+) -> Result<Json<VerifyAllResponse>, ApiError> {
+    let body = body.map_err(|err| ApiError::bad_request(format!("could not read body: {err}")))?;
+
+    let request: AttestationAllResponse = serde_json::from_str(&body)
+        .map_err(|err| ApiError::bad_request(format!("invalid JSON body: {err}")))?;
+
+    let response = tpm::verify_all(state.inner(), &request)?;
     Ok(Json(response))
 }
 

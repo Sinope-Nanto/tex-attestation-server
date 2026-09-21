@@ -26,8 +26,13 @@
 | `POST` | `/parse-report`                             | `200 { ...解析结果... }` | `400 Bad Request` | –      |
 | `GET`  | `/information_tpm`                          | `200 { ...度量结果... }` | `400 Bad Request` | `501`  |
 | `POST` | `/quote_tpm`                                | `200 { ...quote... }`   | `400 Bad Request` | `501`  |
+| `POST` | `/attestation_all`                          | `200 { ...tpm+tdx... }` | `400 Bad Request` | `501`  |
+| `POST` | `/verify_all`                               | `200 {"trusted":bool,...}` | `400 Bad Request` | `501`  |
 
-后两行是 **TPM** 接口，详见 [TPM 模拟器远程证明](#tpm-模拟器远程证明)。
+`/information_tpm` 与 `/quote_tpm` 是 **TPM** 接口，详见
+[TPM 模拟器远程证明](#tpm-模拟器远程证明)。最后两行是 **组合** 接口：
+一次返回并验证绑定到同一 challenge 的 TPM quote 与 TDX report，详见
+[TPM + TDX 组合远程证明](#tpm--tdx-组合远程证明)。
 
 所有错误响应共用同一个 JSON 信封：
 
@@ -200,7 +205,8 @@ workspace/
     ├── test_tdx_hardware        # 编译后的测试二进制
     ├── test_web_curl.sh         # TDX 接口的端到端 curl 测试
     ├── test_tpm_integration.sh  # 真实模拟器：度量、PCR、quote、校验
-    ├── test_tpm_web.sh          # TPM 接口的端到端 curl 测试
+    ├── test_tpm_web.sh          # TPM 与组合接口的端到端 curl 测试
+    ├── test_attestation_all.rs  # 组合 /attestation_all + /verify_all 校验
     └── test_logging.rs          # 审计日志：事件、错误引用、panic 捕获
 ```
 
@@ -501,6 +507,72 @@ $ tpm2_checkquote -u ak.pem -g sha256 -m quote.msg -s quote.sig -q "$NONCE"
 `tests/test_tpm_web.sh` 正是这么做的：它会拒绝伪造的 quote，
 也会拒绝把 quote 与**错误** challenge 一起提交。
 
+---
+
+## TPM + TDX 组合远程证明
+
+两个远程证明后端可以**一起**使用：`POST /attestation_all` 返回 `/quote_tpm`
+的结构，并额外带上 `evidence.tdx` 字段；`POST /verify_all` 接收同一个结构，
+同时校验两部分。
+
+两部分绑定到**同一个 challenge**，因此校验方可以确认同一个 nonce 既被 TPM
+证明、又被 TDX module 证明。
+
+### `POST /attestation_all`
+
+请求体与 `/quote_tpm` 完全相同（`nonce` / `challenge`，十六进制）。
+
+```console
+$ NONCE=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+$ curl -sS -X POST -H 'Content-Type: application/json' \
+       -d "{\"nonce\":\"$NONCE\"}" \
+       http://127.0.0.1:8080/attestation_all | jq .
+{
+  "status": 0,
+  "measurement": { ... },
+  "pcr_value": "9f2dbe61...",
+  "pcr_index": 16,
+  "hash_algorithm": "sha256",
+  "evidence": {
+    "tpm": { ...与 /quote_tpm 相同... },
+    "tdx": {
+      "report": "<2048 个十六进制字符，1024 字节 TDREPORT>",
+      "nonce": "f0e1d2c3...",
+      "nonce_size": 32
+    }
+  },
+  "ak_pubkey": "-----BEGIN PUBLIC KEY-----\n..."
+}
+```
+
+* `evidence.tpm` 与 `/quote_tpm` 返回的内容完全一致。
+* `evidence.tdx.report` 是由 TDX module（`/dev/tdx_guest`）产生的真实
+  `TDREPORT`，其 `REPORTDATA` 由同一个 challenge 填充。
+* 只要**任一**后端不可用，整个请求返回 `501`，绝不会返回半填充的结构。
+
+### `POST /verify_all`
+
+请求体：`/attestation_all` 返回的完整结构。
+
+```console
+$ curl -sS -X POST -H 'Content-Type: application/json' \
+       --data-binary @all.json \
+       http://127.0.0.1:8080/verify_all | jq .
+{
+  "trusted": true,
+  "tpm_trusted": true,
+  "tdx_trusted": true
+}
+```
+
+* `tdx_trusted` 来自 TDX module 本身（`TDCALL[TDG.MR.VERIFYREPORT]`）。
+* `tpm_trusted` 来自 `tpm2_checkquote`，使用同一结构携带的 Attestation Key
+  公钥进行校验。
+* 只有**两部分都通过**时 `trusted` 才为 `true`。被篡改的 TDX report 或 TPM
+  签名会得到 `trusted=false`，对应标志位为 `false`。
+* 缺少 `tdx` 字段或 report 非十六进制时返回 `400 Bad Request`，而不是静默的
+  `trusted=false`。
+
 ### 运行
 
 ```console
@@ -535,7 +607,10 @@ make test-tpm-web   # /information_tpm 与 /quote_tpm 的 curl 端到端测试
   `{"nonce":"abc"}`、65 字节 nonce、`nonce`/`challenge` 冲突、非 JSON body）
   都返回带 `{"error":...}` 信封的 `400`；
 * 原有 TDX 接口（`/ping`、`/attestation-with-randomnumber`、`/verify-report`、
-  `/parse-report`）行为不变。
+  `/parse-report`）行为不变；
+* `/attestation_all` 同时返回 `evidence.tpm` 与 `evidence.tdx`，且 TDX report
+  绑定到同一个 challenge；`/verify_all` 接受该结构（`trusted=true`），拒绝被
+  篡改的 TDX report（`tdx_trusted=false`），对缺少 `tdx` 字段的结构返回 `400`。
 
 ### 故障排查
 
