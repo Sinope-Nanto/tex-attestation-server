@@ -24,6 +24,13 @@ serde_json = "1"
 hex = "0.4"
 # Raw ioctl(2) for the TDX guest driver and the TDG.MR.VERIFYREPORT helper.
 libc = "0.2"
+# TPM folder measurement (SHA-256 over the per-file digests).
+sha2 = "0.10"
+# Base64 of the TPM quote blobs, matching the GPU node wire format.
+base64 = "0.22"
+# Logging. Rocket installs the `log` backend at launch, so `log::info!` and
+# friends from this crate end up in the same console stream.
+log = "0.4"
 
 [dev-dependencies]
 # `rocket::local` (used by the integration tests) ships with rocket itself.

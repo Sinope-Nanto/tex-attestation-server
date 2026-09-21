@@ -6,6 +6,12 @@
 //! | `GET`  | `/attestation-with-randomnumber?rn=` | `200 {report}`  | `400` / `501` |
 //! | `POST` | `/verify-report`                     | `200 {trusted}` | `400` / `501` |
 //! | `POST` | `/parse-report`                      | `200 {parsed}`  | `400`         |
+//! | `GET`  | `/information_tpm`                   | `200 {info}`    | `400` / `501` |
+//! | `POST` | `/quote_tpm`                         | `200 {quote}`   | `400` / `501` |
+//!
+//! The two `*_tpm` routes talk to a TPM 2.0 device (the simulator in
+//! `tpm-simu/`) through [`crate::tpm`]; they never interfere with the TDX routes
+//! above.
 
 use std::fmt;
 
@@ -15,10 +21,13 @@ use rocket::request::Request;
 use rocket::response::{self, Responder};
 use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
-use rocket::{get, post};
+use rocket::{get, post, State};
 
 use crate::attestation::{generate_tdx_report, verify_tdx_report, AttestationError};
 use crate::report::{parse_tdreport, ParseReportRequest, ParseReportResponse};
+use crate::tpm::{
+    self, InformationTpmResponse, QuoteTpmRequest, QuoteTpmResponse, TpmError, TpmState,
+};
 
 // ---------------------------------------------------------------------------
 // Payloads
@@ -109,6 +118,17 @@ impl From<AttestationError> for ApiError {
             ),
             AttestationError::InvalidInput(msg) => Self::new(Status::BadRequest, msg),
             AttestationError::Internal(msg) => Self::new(Status::InternalServerError, msg),
+        }
+    }
+}
+
+impl From<TpmError> for ApiError {
+    fn from(err: TpmError) -> Self {
+        match err {
+            // No TPM backend reachable -> 501, never a fabricated measurement.
+            TpmError::NotImplemented(msg) => Self::new(Status::NotImplemented, msg),
+            TpmError::InvalidInput(msg) => Self::new(Status::BadRequest, msg),
+            TpmError::Internal(msg) => Self::new(Status::InternalServerError, msg),
         }
     }
 }
@@ -225,6 +245,64 @@ pub fn parse_report(
 }
 
 // ---------------------------------------------------------------------------
+// TPM routes
+// ---------------------------------------------------------------------------
+
+/// `GET /information_tpm`
+///
+/// Measures the configured directory (`TPM_MEASURE_DIR`, default: `src/`),
+/// extends the configured PCR (`TPM_PCR_INDEX`, default: `16`) with the folder
+/// digest, reads the PCR back and returns the measurement, the PCR value and
+/// the TPM information.
+///
+/// * missing / unreadable directory   -> `500 Internal Server Error`
+/// * simulator not reachable          -> `501 Not Implemented`
+/// * otherwise                        -> `200 { ... }`
+///
+/// Nothing is fabricated: both the PCR value and every digest come from the TPM
+/// and from the filesystem respectively.
+#[get("/information_tpm")]
+pub fn information_tpm(state: &State<TpmState>) -> Result<Json<InformationTpmResponse>, ApiError> {
+    let response = tpm::information_tpm(state.inner())?;
+    Ok(Json(response))
+}
+
+/// `POST /quote_tpm`
+///
+/// Request body (`gpu-node` compatible):
+///
+/// ```json
+/// { "nonce": "<hex>", "nonce_size": 32, "mask": "..." }
+/// ```
+///
+/// `challenge` is accepted as an alias of `nonce`; `nonce_size` and `mask` are
+/// accepted and ignored (the PCR is configured server side).
+///
+/// Runs the same measurement and PCR cycle as `/information_tpm` and then asks
+/// the TPM for a quote over the same PCR, with the challenge bound as
+/// `qualifyingData`. The response carries the real `TPMT_SIGNATURE` and
+/// `TPMS_ATTEST` produced by the TPM.
+///
+/// * unreadable / non-JSON body        -> `400 Bad Request`
+/// * missing / non-hex / oversized     -> `400 Bad Request`
+/// * simulator not reachable           -> `501 Not Implemented`
+/// * otherwise                         -> `200 { ... }`
+#[post("/quote_tpm", data = "<body>")]
+pub fn quote_tpm(
+    state: &State<TpmState>,
+    body: Result<String, std::io::Error>,
+) -> Result<Json<QuoteTpmResponse>, ApiError> {
+    let body = body.map_err(|err| ApiError::bad_request(format!("could not read body: {err}")))?;
+
+    let request: QuoteTpmRequest = serde_json::from_str(&body)
+        .map_err(|err| ApiError::bad_request(format!("invalid JSON body: {err}")))?;
+
+    let nonce = request.resolved_nonce()?;
+    let response = tpm::quote_tpm(state.inner(), &nonce)?;
+    Ok(Json(response))
+}
+
+// ---------------------------------------------------------------------------
 // Catchers
 // ---------------------------------------------------------------------------
 //
@@ -292,6 +370,26 @@ mod tests {
     #[test]
     fn internal_maps_to_500() {
         let err: ApiError = AttestationError::Internal("boom".into()).into();
+        assert_eq!(err.status(), Status::InternalServerError);
+    }
+
+    #[test]
+    fn tpm_not_implemented_maps_to_501() {
+        let err: ApiError = TpmError::NotImplemented("no simulator".into()).into();
+        assert_eq!(err.status(), Status::NotImplemented);
+        assert_eq!(err.message(), "no simulator");
+    }
+
+    #[test]
+    fn tpm_invalid_input_maps_to_400() {
+        let err: ApiError = TpmError::InvalidInput("bad nonce".into()).into();
+        assert_eq!(err.status(), Status::BadRequest);
+        assert_eq!(err.message(), "bad nonce");
+    }
+
+    #[test]
+    fn tpm_internal_maps_to_500() {
+        let err: ApiError = TpmError::Internal("boom".into()).into();
         assert_eq!(err.status(), Status::InternalServerError);
     }
 }

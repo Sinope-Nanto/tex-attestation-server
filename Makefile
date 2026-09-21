@@ -13,7 +13,7 @@ CC    ?= cc
 
 WEB_BASE_URL ?= http://127.0.0.1:8080
 
-.PHONY: all build test test-hw test-unit test-web kmod kmod-load clean
+.PHONY: all build test test-hw test-unit test-web test-tpm test-tpm-web kmod kmod-load clean
 
 all: build
 
@@ -34,7 +34,15 @@ test-unit:
 test-web:
 	WEB_BASE_URL=$(WEB_BASE_URL) bash tests/test_web_curl.sh
 
-test: test-hw test-unit test-web
+# Real TPM 2.0 simulator integration test (starts tpm-simu if needed).
+test-tpm:
+	bash tests/test_tpm_integration.sh
+
+# curl(1) end-to-end test of the /information_tpm and /quote_tpm endpoints.
+test-tpm-web:
+	WEB_BASE_URL=$(WEB_BASE_URL) bash tests/test_tpm_web.sh
+
+test: test-hw test-unit test-web test-tpm test-tpm-web
 
 # Helper kernel module: TDG.MR.VERIFYREPORT (TDX module leaf 22) for userspace.
 kmod:
