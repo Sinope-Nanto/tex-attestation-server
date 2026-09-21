@@ -18,6 +18,7 @@
 
 pub mod api;
 pub mod attestation;
+pub mod logging;
 pub mod report;
 pub mod tpm;
 
@@ -65,9 +66,14 @@ use rocket::{Build, Rocket};
 /// assert_eq!(response.status().code, 200);
 /// ```
 pub fn rocket() -> Rocket<Build> {
+    // File based audit log: requests, responses, errors and panics. Rocket owns
+    // the console logger, so this is an independent sink (see `logging`).
+    logging::init();
+
     let tpm_state = tpm::TpmState::from_env();
 
     rocket::build()
+        .attach(logging::RequestLogger)
         .manage(tpm_state)
         .mount(
             "/",

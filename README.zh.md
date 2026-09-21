@@ -186,6 +186,7 @@ workspace/
 │   ├── api.rs            # 路由、请求/响应体、ApiError、JSON catchers、单元测试
 │   ├── attestation.rs    # generate_tdx_report / verify_tdx_report（含硬件校验）
 │   ├── report.rs         # parse_tdreport：把 TDREPORT 解析为人类易读的 JSON
+│   ├── logging.rs        # 基于文件的审计日志：请求、响应、错误、panic
 │   └── tpm.rs            # TPM 2.0 后端：目录度量、PCR、quote
 ├── examples/
 │   └── measure_folder.rs # 命令行工具：打印某个目录的度量摘要
@@ -199,7 +200,8 @@ workspace/
     ├── test_tdx_hardware        # 编译后的测试二进制
     ├── test_web_curl.sh         # TDX 接口的端到端 curl 测试
     ├── test_tpm_integration.sh  # 真实模拟器：度量、PCR、quote、校验
-    └── test_tpm_web.sh          # TPM 接口的端到端 curl 测试
+    ├── test_tpm_web.sh          # TPM 接口的端到端 curl 测试
+    └── test_logging.rs          # 审计日志：事件、错误引用、panic 捕获
 ```
 
 ### TDX 相关代码在哪里
@@ -231,6 +233,40 @@ cargo run
 ```
 
 服务默认端口是 Rocket 的 `8000`；测试脚本使用 `8080`。可通过 `ROCKET_PORT` 覆盖。
+
+---
+
+## 日志
+
+除 Rocket 输出到控制台的日志外，服务还会在项目目录下维护一份基于文件的**审计日志**，
+记录事后排查所需的必要信息：
+
+* 每个 HTTP **请求**（方法、URI、客户端 IP）；
+* 每个**响应**（方法、URI、状态码、耗时毫秒数）；
+* 服务返回的每个**错误**，包含可读的原因（响应 fairing 只能看到状态码，
+  因此原因在错误产生处记录）；
+* 每次 **panic** —— panic hook 会在进程退出前记录线程、源码位置与消息，
+  使意外崩溃可被事后诊断。
+
+每行一个事件，采用 `key=value` 形式，既便于阅读也便于 grep：
+
+```text
+2024-01-01T00:00:00Z INFO  event=request method=GET uri=/ping client=127.0.0.1
+2024-01-01T00:00:00Z INFO  event=response method=GET uri=/ping status=200 latency_ms=0
+2024-01-01T00:00:00Z ERROR event=error method=POST uri=/verify-report status=400 message="..."
+2024-01-01T00:00:00Z ERROR event=panic thread=main location=src/api.rs:1:1 message="..."
+```
+
+日志默认位于 `log/tdx-attestation.log`，可通过环境变量重定向：
+
+| 变量           | 默认值                            | 含义             |
+|----------------|-----------------------------------|------------------|
+| `TDX_LOG_DIR`  | `<项目>/log`                      | 日志文件所在目录 |
+| `TDX_LOG_FILE` | `<TDX_LOG_DIR>/tdx-attestation.log` | 日志文件完整路径 |
+
+日志是尽力而为的：若文件无法打开，服务仍会继续运行，日志退化为空操作 ——
+日志绝不能成为请求失败的原因。实现位于 [`src/logging.rs`](src/logging.rs)，
+由 [`tests/test_logging.rs`](tests/test_logging.rs) 覆盖。
 
 ## 测试
 

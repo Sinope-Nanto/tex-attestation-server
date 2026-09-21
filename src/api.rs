@@ -143,6 +143,15 @@ impl std::error::Error for ApiError {}
 
 impl<'r> Responder<'r, 'static> for ApiError {
     fn respond_to(self, req: &'r Request<'_>) -> response::Result<'static> {
+        // Record the failure before it is rendered: the response fairing only
+        // sees the status code, not the reason the handler produced it.
+        crate::logging::log_error(
+            req.method().as_str(),
+            &req.uri().to_string(),
+            self.status,
+            &self.message,
+        );
+
         let body = Json(ErrorResponse::new(self.message));
         (self.status, body).respond_to(req)
     }
@@ -312,42 +321,44 @@ pub fn quote_tpm(
 
 /// `400` - the request could not be parsed at the HTTP level.
 #[catch(400)]
-pub fn catch_bad_request() -> (Status, Json<ErrorResponse>) {
-    (
-        Status::BadRequest,
-        Json(ErrorResponse::new(
-            "the request could not be understood (malformed syntax)",
-        )),
-    )
+pub fn catch_bad_request(req: &Request<'_>) -> (Status, Json<ErrorResponse>) {
+    let message = "the request could not be understood (malformed syntax)";
+    crate::logging::log_error(req.method().as_str(), &req.uri().to_string(), Status::BadRequest, message);
+    (Status::BadRequest, Json(ErrorResponse::new(message)))
 }
 
 /// `404` - no route matched the request.
 #[catch(404)]
-pub fn catch_not_found() -> (Status, Json<ErrorResponse>) {
-    (
-        Status::NotFound,
-        Json(ErrorResponse::new("resource not found")),
-    )
+pub fn catch_not_found(req: &Request<'_>) -> (Status, Json<ErrorResponse>) {
+    let message = "resource not found";
+    crate::logging::log_error(req.method().as_str(), &req.uri().to_string(), Status::NotFound, message);
+    (Status::NotFound, Json(ErrorResponse::new(message)))
 }
 
 /// `422` - a route matched but its parameters could not be parsed.
 #[catch(422)]
-pub fn catch_unprocessable_entity() -> (Status, Json<ErrorResponse>) {
-    (
+pub fn catch_unprocessable_entity(req: &Request<'_>) -> (Status, Json<ErrorResponse>) {
+    let message = "the request parameters could not be processed";
+    crate::logging::log_error(
+        req.method().as_str(),
+        &req.uri().to_string(),
         Status::UnprocessableEntity,
-        Json(ErrorResponse::new(
-            "the request parameters could not be processed",
-        )),
-    )
+        message,
+    );
+    (Status::UnprocessableEntity, Json(ErrorResponse::new(message)))
 }
 
 /// `500` - an unexpected internal failure.
 #[catch(500)]
-pub fn catch_internal_server_error() -> (Status, Json<ErrorResponse>) {
-    (
+pub fn catch_internal_server_error(req: &Request<'_>) -> (Status, Json<ErrorResponse>) {
+    let message = "internal server error";
+    crate::logging::log_error(
+        req.method().as_str(),
+        &req.uri().to_string(),
         Status::InternalServerError,
-        Json(ErrorResponse::new("internal server error")),
-    )
+        message,
+    );
+    (Status::InternalServerError, Json(ErrorResponse::new(message)))
 }
 
 #[cfg(test)]

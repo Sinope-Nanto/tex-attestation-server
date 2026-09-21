@@ -143,6 +143,7 @@ workspace/
 │   ├── api.rs            # routes, payloads, ApiError, JSON catchers, unit tests
 │   ├── attestation.rs    # generate_tdx_report / verify_tdx_report (+ hardware verify)
 │   ├── report.rs         # parse_tdreport: TDREPORT -> human readable JSON
+│   ├── logging.rs        # file based audit log: requests, responses, errors, panics
 │   └── tpm.rs            # TPM 2.0 backend: folder measurement, PCR, quote
 ├── examples/
 │   └── measure_folder.rs # CLI: prints the folder digest of a directory
@@ -156,7 +157,8 @@ workspace/
     ├── test_tdx_hardware        # compiled test binary
     ├── test_web_curl.sh         # end-to-end curl test of the TDX endpoints
     ├── test_tpm_integration.sh  # real simulator: measure, PCR, quote, verify
-    └── test_tpm_web.sh          # end-to-end curl test of the TPM endpoints
+    ├── test_tpm_web.sh          # end-to-end curl test of the TPM endpoints
+    └── test_logging.rs          # audit log: events, error quoting, panic capture
 ```
 
 ### Where the TDX work lives
@@ -182,6 +184,44 @@ cargo run
 ```
 
 The server default port is Rocket's `8000`; the test harness uses `8080`. Override with `ROCKET_PORT`.
+
+---
+
+## Logging
+
+The service keeps a file based **audit log** next to the console output Rocket
+produces. It records the information an operator needs *after* something went
+wrong:
+
+* every HTTP **request** (method, URI, client IP);
+* every **response** (method, URI, status code, latency in ms);
+* every **error** the service answered with, including the human readable reason
+  (the response fairing only sees the status code, so the reason is logged where
+  the error is produced);
+* every **panic** - the panic hook records the thread, source location and
+  message before the process aborts, so an unexpected crash is diagnosable.
+
+One event per line, `key=value` pairs, so the file is both human readable and
+easy to grep:
+
+```text
+2024-01-01T00:00:00Z INFO  event=request method=GET uri=/ping client=127.0.0.1
+2024-01-01T00:00:00Z INFO  event=response method=GET uri=/ping status=200 latency_ms=0
+2024-01-01T00:00:00Z ERROR event=error method=POST uri=/verify-report status=400 message="..."
+2024-01-01T00:00:00Z ERROR event=panic thread=main location=src/api.rs:1:1 message="..."
+```
+
+The log lives in `log/tdx-attestation.log` by default and can be redirected:
+
+| Variable       | Default                          | Meaning                       |
+|----------------|----------------------------------|-------------------------------|
+| `TDX_LOG_DIR`  | `<project>/log`                  | directory the log file lives in |
+| `TDX_LOG_FILE` | `<TDX_LOG_DIR>/tdx-attestation.log` | full path of the log file  |
+
+Logging is best effort: if the file cannot be opened the service keeps running
+and logging degrades to a no-op - logging must never be the reason a request
+fails. The implementation is in [`src/logging.rs`](src/logging.rs) and is covered
+by [`tests/test_logging.rs`](tests/test_logging.rs).
 
 ## Test
 
