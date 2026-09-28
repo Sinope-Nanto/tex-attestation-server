@@ -6,6 +6,7 @@
 //! | `GET`  | `/attestation-with-randomnumber?rn=` | `200 {report}`  | `400` / `501` |
 //! | `POST` | `/verify-report`                     | `200 {trusted}` | `400` / `501` |
 //! | `POST` | `/parse-report`                      | `200 {parsed}`  | `400`         |
+//! | `GET`  | `/gpu-attestation`                   | `200 {gpu}`     | `500` / `501` |
 //! | `GET`  | `/information_tpm`                   | `200 {info}`    | `400` / `501` |
 //! | `POST` | `/quote_tpm`                         | `200 {quote}`   | `400` / `501` |
 //! | `POST` | `/attestation_all`                   | `200 {all}`     | `400` / `501` |
@@ -26,6 +27,7 @@ use rocket::serde::{Deserialize, Serialize};
 use rocket::{get, post, State};
 
 use crate::attestation::{generate_tdx_report, verify_tdx_report, AttestationError};
+use crate::gpu::{self, GpuAttestationResponse, GpuError};
 use crate::report::{parse_tdreport, ParseReportRequest, ParseReportResponse};
 use crate::tpm::{
     self, AttestationAllResponse, InformationTpmResponse, QuoteTpmRequest, QuoteTpmResponse,
@@ -132,6 +134,17 @@ impl From<TpmError> for ApiError {
             TpmError::NotImplemented(msg) => Self::new(Status::NotImplemented, msg),
             TpmError::InvalidInput(msg) => Self::new(Status::BadRequest, msg),
             TpmError::Internal(msg) => Self::new(Status::InternalServerError, msg),
+        }
+    }
+}
+
+impl From<GpuError> for ApiError {
+    fn from(err: GpuError) -> Self {
+        match err {
+            // No GPU attestation backend in this environment -> 501, never a
+            // fabricated result.
+            GpuError::NotImplemented(msg) => Self::new(Status::NotImplemented, msg),
+            GpuError::Internal(msg) => Self::new(Status::InternalServerError, msg),
         }
     }
 }
@@ -254,6 +267,33 @@ pub fn parse_report(
 
     let parsed = parse_tdreport(&report)?;
     Ok(Json(parsed))
+}
+
+// ---------------------------------------------------------------------------
+// GPU route
+// ---------------------------------------------------------------------------
+
+/// `GET /gpu-attestation`
+///
+/// Runs the GPU attestation script (`gpu-attest/gpu_local_attest.sh`, overridable
+/// with `GPU_ATTEST_SCRIPT`) and returns the text it produced verbatim in the
+/// `gpu-attestation` field:
+///
+/// ```json
+/// { "gpu-attestation": "<script output>" }
+/// ```
+///
+/// The script drives the NVIDIA attestation SDK; its report is written to stderr,
+/// so both streams are captured. Nothing is fabricated: the field carries exactly
+/// what the script printed.
+///
+/// * script missing / not executable -> `501 Not Implemented`
+/// * script exits non-zero           -> `500 Internal Server Error`
+/// * otherwise                       -> `200 { "gpu-attestation": "..." }`
+#[get("/gpu-attestation")]
+pub fn gpu_attestation() -> Result<Json<GpuAttestationResponse>, ApiError> {
+    let gpu_attestation = gpu::gpu_attestation()?;
+    Ok(Json(GpuAttestationResponse { gpu_attestation }))
 }
 
 // ---------------------------------------------------------------------------

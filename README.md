@@ -24,6 +24,7 @@ A report is never fabricated and never reported as trusted without that hardware
 | `GET`  | `/attestation-with-randomnumber?rn=<hex>` | `200 {"report":"<hex>"}` | `400 Bad Request` | `501` |
 | `POST` | `/verify-report`                       | `200 {"trusted":bool}` | `400 Bad Request` | `501` |
 | `POST` | `/parse-report`                        | `200 { ...decoded... }` | `400 Bad Request` | – |
+| `GET`  | `/gpu-attestation`                     | `200 {"gpu-attestation":"..."}` | – | `501` |
 | `GET`  | `/information_tpm`                     | `200 { ...measurement... }` | `400 Bad Request` | `501` |
 | `POST` | `/quote_tpm`                           | `200 { ...quote... }` | `400 Bad Request` | `501` |
 | `POST` | `/attestation_all`                     | `200 { ...tpm+tdx... }` | `400 Bad Request` | `501` |
@@ -52,7 +53,7 @@ Liveness probe. Always `200 OK` with the plain-text body `pong`.
 * Shorter nonces are zero-padded to the fixed 64-byte `REPORTDATA`; longer ones are a `400`.
 
 ```console
-$ curl -i "http://127.0.0.1:8080/attestation-with-randomnumber?rn=deadbeef"
+$ curl -i "http://127.0.0.1:8000/attestation-with-randomnumber?rn=deadbeef"
 HTTP/1.1 200 OK
 {"report":"<2048 hex chars, 1024-byte TDREPORT>"}
 ```
@@ -72,7 +73,7 @@ The handler parses the JSON, validates the hex, decodes it and calls `verify_tdx
 
 ```console
 $ curl -i -X POST -H "Content-Type: application/json" \
-       -d '{"report":"<hex>"}' http://127.0.0.1:8080/verify-report
+       -d '{"report":"<hex>"}' http://127.0.0.1:8000/verify-report
 HTTP/1.1 200 OK
 {"trusted":true}     # pristine report
 {"trusted":false}    # tampered report
@@ -94,7 +95,7 @@ fields mirror the Intel TDX Module ABI `TDREPORT_STRUCT`.
 
 ```console
 $ curl -sS -X POST -H "Content-Type: application/json" \
-       -d '{"report":"<hex>"}' http://127.0.0.1:8080/parse-report | jq .
+       -d '{"report":"<hex>"}' http://127.0.0.1:8000/parse-report | jq .
 {
   "report_len": 1024,
   "report_mac_struct": { "report_data": "...", "mac": "..." },
@@ -110,6 +111,31 @@ $ curl -sS -X POST -H "Content-Type: application/json" \
 
 Errors: malformed JSON, non-hex `report`, or a report that is not 1024 bytes
 all yield `400 Bad Request`.
+
+### 5. `GET /gpu-attestation`
+
+Runs the GPU attestation script (`gpu-attest/gpu_local_attest.sh`, overridable
+with `GPU_ATTEST_SCRIPT`) and returns the text it produced verbatim in the
+`gpu-attestation` field:
+
+```json
+{ "gpu-attestation": "<script output>" }
+```
+
+The script drives the NVIDIA attestation SDK (`gpu-attest/nvattest`); its report
+is written to **stderr**, so both streams are captured and concatenated. Nothing
+is fabricated: the field carries exactly what the script printed.
+
+```console
+$ curl -sS http://127.0.0.1:8000/gpu-attestation | jq .
+{
+  "gpu-attestation": "...\nGPU attestation was successful\n"
+}
+```
+
+* script missing / not executable -> `501 Not Implemented`;
+* script exits non-zero           -> `500 Internal Server Error`;
+* otherwise                       -> `200 { "gpu-attestation": "..." }`.
 
 ---
 
@@ -149,7 +175,11 @@ workspace/
 │   ├── attestation.rs    # generate_tdx_report / verify_tdx_report (+ hardware verify)
 │   ├── report.rs         # parse_tdreport: TDREPORT -> human readable JSON
 │   ├── logging.rs        # file based audit log: requests, responses, errors, panics
+│   ├── gpu.rs            # GPU backend: runs gpu-attest/gpu_local_attest.sh
 │   └── tpm.rs            # TPM 2.0 backend: folder measurement, PCR, quote
+├── gpu-attest/
+│   ├── gpu_local_attest.sh # GPU attestation script (run by GET /gpu-attestation)
+│   └── nvattest            # NVIDIA attestation SDK CLI
 ├── examples/
 │   └── measure_folder.rs # CLI: prints the folder digest of a directory
 ├── kmod/
@@ -164,6 +194,8 @@ workspace/
     ├── test_tpm_integration.sh  # real simulator: measure, PCR, quote, verify
     ├── test_tpm_web.sh          # end-to-end curl test of the TPM + combined endpoints
     ├── test_attestation_all.rs  # combined /attestation_all + /verify_all validation
+    ├── test_gpu_attestation.rs  # /gpu-attestation returns the script output
+    ├── test_gpu_web.sh          # end-to-end curl test of /gpu-attestation
     └── test_logging.rs          # audit log: events, error quoting, panic capture
 ```
 
@@ -184,12 +216,39 @@ The error type `AttestationError` has three variants — `NotImplemented`, `Inva
 
 ## Run
 
+The service listens on **port `8000`** (configured in `Rocket.toml`).
+
 ```console
 cargo run
-# or: ROCKET_PORT=8080 ROCKET_ADDRESS=127.0.0.1 cargo run
+# or: ROCKET_PORT=8000 ROCKET_ADDRESS=127.0.0.1 cargo run
 ```
 
-The server default port is Rocket's `8000`; the test harness uses `8080`. Override with `ROCKET_PORT`.
+Override the port with `ROCKET_PORT` if needed. The test harness starts the
+service on the same port (`8000` by default).
+
+### Quick start with `curl`
+
+With the service running on `http://127.0.0.1:8000`, these commands can be pasted
+directly into a terminal:
+
+```console
+# liveness probe
+curl -sS http://127.0.0.1:8000/ping
+
+# generate a TDX report bound to a nonce
+curl -sS "http://127.0.0.1:8000/attestation-with-randomnumber?rn=deadbeef"
+
+# GPU attestation (runs gpu-attest/gpu_local_attest.sh)
+curl -sS http://127.0.0.1:8000/gpu-attestation
+
+# TPM measurement
+curl -sS http://127.0.0.1:8000/information_tpm
+
+# TPM quote for a fresh challenge
+NONCE=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+curl -sS -X POST -H 'Content-Type: application/json' \
+     -d "{\"nonce\":\"$NONCE\"}" http://127.0.0.1:8000/quote_tpm
+```
 
 ---
 
@@ -240,7 +299,8 @@ or individually:
 ```console
 make test-hw       # ./tests/test_tdx_hardware   (real /dev/tdx_guest + /dev/tdx_verify)
 make test-unit     # cargo test
-make test-web      # WEB_BASE_URL=http://127.0.0.1:8080 bash tests/test_web_curl.sh
+make test-web      # WEB_BASE_URL=http://127.0.0.1:8000 bash tests/test_web_curl.sh
+make test-gpu-web  # WEB_BASE_URL=http://127.0.0.1:8000 bash tests/test_gpu_web.sh
 ```
 
 The hardware test asserts, against the real TDX module:
@@ -382,7 +442,7 @@ Measures the configured directory, extends the configured PCR with the folder
 digest, reads the PCR back and returns all of it.
 
 ```console
-$ curl -sS http://127.0.0.1:8080/information_tpm | jq .
+$ curl -sS http://127.0.0.1:8000/information_tpm | jq .
 {
   "backend": "tpm2-tools",
   "simulator": "tpm-simu",
@@ -424,7 +484,7 @@ configured server side).
 $ NONCE=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
 $ curl -sS -X POST -H 'Content-Type: application/json' \
        -d "{\"nonce\":\"$NONCE\"}" \
-       http://127.0.0.1:8080/quote_tpm | jq .
+       http://127.0.0.1:8000/quote_tpm | jq .
 {
   "status": 0,
   "measurement": { "time-stamp": "...", "measurement": [ ... ],
@@ -494,7 +554,7 @@ Request body: identical to `/quote_tpm` (`nonce` / `challenge`, hex encoded).
 $ NONCE=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
 $ curl -sS -X POST -H 'Content-Type: application/json' \
        -d "{\"nonce\":\"$NONCE\"}" \
-       http://127.0.0.1:8080/attestation_all | jq .
+       http://127.0.0.1:8000/attestation_all | jq .
 {
   "status": 0,
   "measurement": { ... },
@@ -526,7 +586,7 @@ Request body: the exact structure returned by `/attestation_all`.
 ```console
 $ curl -sS -X POST -H 'Content-Type: application/json' \
        --data-binary @all.json \
-       http://127.0.0.1:8080/verify_all | jq .
+       http://127.0.0.1:8000/verify_all | jq .
 {
   "trusted": true,
   "tpm_trusted": true,

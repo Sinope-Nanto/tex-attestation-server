@@ -11,9 +11,9 @@
 CARGO ?= cargo
 CC    ?= cc
 
-WEB_BASE_URL ?= http://127.0.0.1:8080
+WEB_BASE_URL ?= http://127.0.0.1:8000
 
-.PHONY: all build test test-hw test-unit test-web test-tpm test-tpm-web kmod kmod-load clean
+.PHONY: all build test test-hw test-unit test-web test-tpm test-tpm-web test-gpu-web kmod kmod-load clean
 
 all: build
 
@@ -42,7 +42,11 @@ test-tpm:
 test-tpm-web:
 	WEB_BASE_URL=$(WEB_BASE_URL) bash tests/test_tpm_web.sh
 
-test: test-hw test-unit test-web test-tpm test-tpm-web
+# curl(1) end-to-end test of the GPU attestation endpoint.
+test-gpu-web:
+	WEB_BASE_URL=$(WEB_BASE_URL) bash tests/test_gpu_web.sh
+
+test: test-hw test-unit test-web test-tpm test-tpm-web test-gpu-web
 
 # Helper kernel module: TDG.MR.VERIFYREPORT (TDX module leaf 22) for userspace.
 kmod:

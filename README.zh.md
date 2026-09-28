@@ -24,6 +24,7 @@
 | `GET`  | `/attestation-with-randomnumber?rn=<hex>`   | `200 {"report":"<hex>"}` | `400 Bad Request` | `501`  |
 | `POST` | `/verify-report`                            | `200 {"trusted":bool}`  | `400 Bad Request` | `501`  |
 | `POST` | `/parse-report`                             | `200 { ...解析结果... }` | `400 Bad Request` | –      |
+| `GET`  | `/gpu-attestation`                          | `200 {"gpu-attestation":"..."}` | –        | `501`  |
 | `GET`  | `/information_tpm`                          | `200 { ...度量结果... }` | `400 Bad Request` | `501`  |
 | `POST` | `/quote_tpm`                                | `200 { ...quote... }`   | `400 Bad Request` | `501`  |
 | `POST` | `/attestation_all`                          | `200 { ...tpm+tdx... }` | `400 Bad Request` | `501`  |
@@ -51,7 +52,7 @@
 * 较短的 nonce 会被零填充到固定的 64 字节 `REPORTDATA`；超过 64 字节则返回 `400`。
 
 ```console
-$ curl -i "http://127.0.0.1:8080/attestation-with-randomnumber?rn=deadbeef"
+$ curl -i "http://127.0.0.1:8000/attestation-with-randomnumber?rn=deadbeef"
 HTTP/1.1 200 OK
 {"report":"<2048 个十六进制字符，即 1024 字节的 TDREPORT>"}
 ```
@@ -71,7 +72,7 @@ HTTP/1.1 200 OK
 
 ```console
 $ curl -i -X POST -H "Content-Type: application/json" \
-       -d '{"report":"<hex>"}' http://127.0.0.1:8080/verify-report
+       -d '{"report":"<hex>"}' http://127.0.0.1:8000/verify-report
 HTTP/1.1 200 OK
 {"trusted":true}     # 未被篡改的报告
 {"trusted":false}    # 被篡改的报告
@@ -93,7 +94,7 @@ Intel TDX Module ABI 中的 `TDREPORT_STRUCT` 一一对应。
 
 ```console
 $ curl -sS -X POST -H "Content-Type: application/json" \
-       -d '{"report":"<hex>"}' http://127.0.0.1:8080/parse-report | jq .
+       -d '{"report":"<hex>"}' http://127.0.0.1:8000/parse-report | jq .
 {
   "report_len": 1024,
   "report_mac_struct": {
@@ -154,6 +155,29 @@ $ curl -sS -X POST -H "Content-Type: application/json" \
 * `report` 不是合法十六进制 → `400 Bad Request`；
 * `report` 解码后不是 1024 字节 → `400 Bad Request`。
 
+### 5. `GET /gpu-attestation`
+
+运行 GPU 证明脚本（`gpu-attest/gpu_local_attest.sh`，可用 `GPU_ATTEST_SCRIPT`
+覆盖），并把脚本产生的文本原样放进 `gpu-attestation` 字段返回：
+
+```json
+{ "gpu-attestation": "<脚本输出>" }
+```
+
+该脚本驱动 NVIDIA 证明 SDK（`gpu-attest/nvattest`）；它的报告写到 **stderr**，
+因此标准输出与标准错误都会被捕获并拼接。结果绝不伪造：字段内容就是脚本打印的内容。
+
+```console
+$ curl -sS http://127.0.0.1:8000/gpu-attestation | jq .
+{
+  "gpu-attestation": "...\nGPU attestation was successful\n"
+}
+```
+
+* 脚本缺失 / 不可执行 → `501 Not Implemented`；
+* 脚本以非零状态退出 → `500 Internal Server Error`；
+* 其他情况 → `200 { "gpu-attestation": "..." }`。
+
 ---
 
 ## 校验是如何工作的（以及为什么需要辅助内核模块）
@@ -192,7 +216,11 @@ workspace/
 │   ├── attestation.rs    # generate_tdx_report / verify_tdx_report（含硬件校验）
 │   ├── report.rs         # parse_tdreport：把 TDREPORT 解析为人类易读的 JSON
 │   ├── logging.rs        # 基于文件的审计日志：请求、响应、错误、panic
+│   ├── gpu.rs            # GPU 后端：运行 gpu-attest/gpu_local_attest.sh
 │   └── tpm.rs            # TPM 2.0 后端：目录度量、PCR、quote
+├── gpu-attest/
+│   ├── gpu_local_attest.sh # GPU 证明脚本（由 GET /gpu-attestation 运行）
+│   └── nvattest            # NVIDIA 证明 SDK 命令行工具
 ├── examples/
 │   └── measure_folder.rs # 命令行工具：打印某个目录的度量摘要
 ├── kmod/
@@ -207,6 +235,8 @@ workspace/
     ├── test_tpm_integration.sh  # 真实模拟器：度量、PCR、quote、校验
     ├── test_tpm_web.sh          # TPM 与组合接口的端到端 curl 测试
     ├── test_attestation_all.rs  # 组合 /attestation_all + /verify_all 校验
+    ├── test_gpu_attestation.rs  # /gpu-attestation 返回脚本输出
+    ├── test_gpu_web.sh          # /gpu-attestation 的端到端 curl 测试
     └── test_logging.rs          # 审计日志：事件、错误引用、panic 捕获
 ```
 
@@ -233,12 +263,38 @@ workspace/
 
 ## 运行
 
+服务监听 **`8000` 端口**（在 `Rocket.toml` 中配置）。
+
 ```console
 cargo run
-# 或：ROCKET_PORT=8080 ROCKET_ADDRESS=127.0.0.1 cargo run
+# 或：ROCKET_PORT=8000 ROCKET_ADDRESS=127.0.0.1 cargo run
 ```
 
-服务默认端口是 Rocket 的 `8000`；测试脚本使用 `8080`。可通过 `ROCKET_PORT` 覆盖。
+如需修改端口，可通过 `ROCKET_PORT` 覆盖。测试脚本会在同一端口（默认 `8000`）
+启动服务。
+
+### 使用 `curl` 快速上手
+
+服务运行在 `http://127.0.0.1:8000` 时，以下命令可直接粘贴到终端执行：
+
+```console
+# 存活探针
+curl -sS http://127.0.0.1:8000/ping
+
+# 生成绑定到 nonce 的 TDX 报告
+curl -sS "http://127.0.0.1:8000/attestation-with-randomnumber?rn=deadbeef"
+
+# GPU 远程证明（运行 gpu-attest/gpu_local_attest.sh）
+curl -sS http://127.0.0.1:8000/gpu-attestation
+
+# TPM 度量
+curl -sS http://127.0.0.1:8000/information_tpm
+
+# 针对新 challenge 的 TPM quote
+NONCE=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+curl -sS -X POST -H 'Content-Type: application/json' \
+     -d "{\"nonce\":\"$NONCE\"}" http://127.0.0.1:8000/quote_tpm
+```
 
 ---
 
@@ -285,9 +341,10 @@ make test          # 硬件测试 + cargo 单元测试 + curl Web 测试
 ```console
 make test-hw       # ./tests/test_tdx_hardware   （需要真实的 /dev/tdx_guest + /dev/tdx_verify）
 make test-unit     # cargo test
-make test-web      # WEB_BASE_URL=http://127.0.0.1:8080 bash tests/test_web_curl.sh
+make test-web      # WEB_BASE_URL=http://127.0.0.1:8000 bash tests/test_web_curl.sh
 make test-tpm      # 真实 TPM 模拟器：度量 + PCR + quote + 校验
 make test-tpm-web  # TPM 接口的端到端 curl 测试
+make test-gpu-web  # /gpu-attestation 的端到端 curl 测试
 ```
 
 硬件测试会针对真实 TDX module 断言：
@@ -416,7 +473,7 @@ $ ./tpm-simu/scripts/test.sh      # 模拟器自带的冒烟测试
 度量配置的目录，把目录摘要 extend 进配置的 PCR，再读回该 PCR，返回上述全部信息。
 
 ```console
-$ curl -sS http://127.0.0.1:8080/information_tpm | jq .
+$ curl -sS http://127.0.0.1:8000/information_tpm | jq .
 {
   "backend": "tpm2-tools",
   "simulator": "tpm-simu",
@@ -457,7 +514,7 @@ $ curl -sS http://127.0.0.1:8080/information_tpm | jq .
 $ NONCE=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
 $ curl -sS -X POST -H 'Content-Type: application/json' \
        -d "{\"nonce\":\"$NONCE\"}" \
-       http://127.0.0.1:8080/quote_tpm | jq .
+       http://127.0.0.1:8000/quote_tpm | jq .
 {
   "status": 0,
   "measurement": { "time-stamp": "...", "measurement": [ ... ],
@@ -526,7 +583,7 @@ $ tpm2_checkquote -u ak.pem -g sha256 -m quote.msg -s quote.sig -q "$NONCE"
 $ NONCE=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
 $ curl -sS -X POST -H 'Content-Type: application/json' \
        -d "{\"nonce\":\"$NONCE\"}" \
-       http://127.0.0.1:8080/attestation_all | jq .
+       http://127.0.0.1:8000/attestation_all | jq .
 {
   "status": 0,
   "measurement": { ... },
@@ -557,7 +614,7 @@ $ curl -sS -X POST -H 'Content-Type: application/json' \
 ```console
 $ curl -sS -X POST -H 'Content-Type: application/json' \
        --data-binary @all.json \
-       http://127.0.0.1:8080/verify_all | jq .
+       http://127.0.0.1:8000/verify_all | jq .
 {
   "trusted": true,
   "tpm_trusted": true,

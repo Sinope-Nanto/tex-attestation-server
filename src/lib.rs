@@ -18,20 +18,25 @@
 
 pub mod api;
 pub mod attestation;
+pub mod gpu;
 pub mod logging;
 pub mod report;
 pub mod tpm;
 
 pub use api::{
-    attestation_all, attestation_with_random_number, information_tpm, parse_report, ping,
-    quote_tpm, verify_all, verify_report, ApiError, AttestationResponse, ErrorResponse,
-    VerifyReportRequest, VerifyReportResponse,
+    attestation_all, attestation_with_random_number, gpu_attestation, information_tpm,
+    parse_report, ping, quote_tpm, verify_all, verify_report, ApiError, AttestationResponse,
+    ErrorResponse, VerifyReportRequest, VerifyReportResponse,
 };
 pub use attestation::{
     generate_tdx_report, random_nonce, tdreport_reportdata, verify_tdx_report,
     verify_tdx_report_hardware, AttestationError, TDG_MR_VERIFYREPORT_LEAF, TDREPORT_LEN,
     TDREPORT_MAC_OFFSET, TDREPORT_REPORTDATA_OFFSET, TDX_GUEST_DEVICE, TDX_SUCCESS,
     TDX_VERIFY_DEVICE,
+};
+pub use gpu::{
+    default_gpu_attest_script, gpu_attest_script_path, gpu_attestation as run_gpu_attestation,
+    GpuAttestationResponse, GpuError, DEFAULT_GPU_ATTEST_SCRIPT, ENV_GPU_ATTEST_SCRIPT,
 };
 pub use report::{
     parse_tdreport, ParseReportRequest, ParseReportResponse, ReportMacStruct, TdInfo, TeeTcbInfo,
@@ -90,6 +95,7 @@ pub fn rocket() -> Rocket<Build> {
                 attestation_with_random_number,
                 verify_report,
                 parse_report,
+                gpu_attestation,
                 information_tpm,
                 quote_tpm,
                 attestation_all,
