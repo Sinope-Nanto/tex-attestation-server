@@ -276,20 +276,20 @@ pub fn parse_report(
 /// `GET /gpu-attestation`
 ///
 /// Runs the GPU attestation script (`gpu-attest/gpu_local_attest.sh`, overridable
-/// with `GPU_ATTEST_SCRIPT`) and returns the text it produced verbatim in the
-/// `gpu-attestation` field:
+/// with `GPU_ATTEST_SCRIPT`) and returns the text it produced, parsed into a
+/// structured JSON document, in the `gpu-attestation` field:
 ///
 /// ```json
-/// { "gpu-attestation": "<script output>" }
+/// { "gpu-attestation": { "successful": true, "summary": "...", "devices": [ ... ] } }
 /// ```
 ///
 /// The script drives the NVIDIA attestation SDK; its report is written to stderr,
-/// so both streams are captured. Nothing is fabricated: the field carries exactly
-/// what the script printed.
+/// so both streams are captured. Nothing is fabricated: every field is copied
+/// from what the script printed (see [`crate::gpu::parse_gpu_attestation`]).
 ///
 /// * script missing / not executable -> `501 Not Implemented`
 /// * script exits non-zero           -> `500 Internal Server Error`
-/// * otherwise                       -> `200 { "gpu-attestation": "..." }`
+/// * otherwise                       -> `200 { "gpu-attestation": { ... } }`
 #[get("/gpu-attestation")]
 pub fn gpu_attestation() -> Result<Json<GpuAttestationResponse>, ApiError> {
     let gpu_attestation = gpu::gpu_attestation()?;

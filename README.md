@@ -24,7 +24,7 @@ A report is never fabricated and never reported as trusted without that hardware
 | `GET`  | `/attestation-with-randomnumber?rn=<hex>` | `200 {"report":"<hex>"}` | `400 Bad Request` | `501` |
 | `POST` | `/verify-report`                       | `200 {"trusted":bool}` | `400 Bad Request` | `501` |
 | `POST` | `/parse-report`                        | `200 { ...decoded... }` | `400 Bad Request` | – |
-| `GET`  | `/gpu-attestation`                     | `200 {"gpu-attestation":"..."}` | – | `501` |
+| `GET`  | `/gpu-attestation`                     | `200 {"gpu-attestation":{...}}` | – | `501` |
 | `GET`  | `/information_tpm`                     | `200 { ...measurement... }` | `400 Bad Request` | `501` |
 | `POST` | `/quote_tpm`                           | `200 { ...quote... }` | `400 Bad Request` | `501` |
 | `POST` | `/attestation_all`                     | `200 { ...tpm+tdx... }` | `400 Bad Request` | `501` |
@@ -115,27 +115,65 @@ all yield `400 Bad Request`.
 ### 5. `GET /gpu-attestation`
 
 Runs the GPU attestation script (`gpu-attest/gpu_local_attest.sh`, overridable
-with `GPU_ATTEST_SCRIPT`) and returns the text it produced verbatim in the
-`gpu-attestation` field:
+with `GPU_ATTEST_SCRIPT`) and returns the text it produced, **parsed into a
+structured JSON document**, in the `gpu-attestation` field:
 
 ```json
-{ "gpu-attestation": "<script output>" }
+{
+  "gpu-attestation": {
+    "successful": true,
+    "summary": "GPU attestation was successful",
+    "devices": [
+      {
+        "index": 0,
+        "device_type": "gpu",
+        "hardware_model": "GH100 A01 GSP BROM",
+        "ueid": "430665101512341769483002607463286621189533065990",
+        "vbios_version": "96.00.CF.00.05",
+        "driver_version": "595.71.05",
+        "measurement_result": "success",
+        "cert_chains": {
+          "Attestation Report Cert Chain": {
+            "status": "valid", "ocsp": "good", "expires": "9999-12-31T23:59:59Z"
+          },
+          "Driver RIM Cert Chain": {
+            "status": "valid", "ocsp": "good", "expires": "2028-04-23T05:42:57Z"
+          },
+          "VBIOS RIM Cert Chain": {
+            "status": "valid", "ocsp": "good", "expires": "2027-02-03T19:23:30Z"
+          }
+        }
+      }
+    ]
+  }
+}
 ```
 
 The script drives the NVIDIA attestation SDK (`gpu-attest/nvattest`); its report
-is written to **stderr**, so both streams are captured and concatenated. Nothing
-is fabricated: the field carries exactly what the script printed.
+is written to **stderr**, so both streams are captured and concatenated before
+being parsed. Nothing is fabricated: every field is copied from what the script
+printed, and a field the script did not print is simply absent.
+
+The parser (`gpu::parse_gpu_attestation`) is deliberately tolerant: it recognises
+the `key: value` lines the SDK prints, groups them under the `Device <n>:` header
+they belong to, and treats any other non-empty line as the trailing summary. A
+line it does not understand is ignored rather than turned into an error, so a
+future SDK that adds a field keeps working.
 
 ```console
 $ curl -sS http://127.0.0.1:8000/gpu-attestation | jq .
 {
-  "gpu-attestation": "...\nGPU attestation was successful\n"
+  "gpu-attestation": {
+    "successful": true,
+    "summary": "GPU attestation was successful",
+    "devices": [ ... ]
+  }
 }
 ```
 
 * script missing / not executable -> `501 Not Implemented`;
 * script exits non-zero           -> `500 Internal Server Error`;
-* otherwise                       -> `200 { "gpu-attestation": "..." }`.
+* otherwise                       -> `200 { "gpu-attestation": { ... } }`.
 
 ---
 
@@ -175,7 +213,7 @@ workspace/
 │   ├── attestation.rs    # generate_tdx_report / verify_tdx_report (+ hardware verify)
 │   ├── report.rs         # parse_tdreport: TDREPORT -> human readable JSON
 │   ├── logging.rs        # file based audit log: requests, responses, errors, panics
-│   ├── gpu.rs            # GPU backend: runs gpu-attest/gpu_local_attest.sh
+│   ├── gpu.rs            # GPU backend: runs + parses gpu-attest/gpu_local_attest.sh
 │   └── tpm.rs            # TPM 2.0 backend: folder measurement, PCR, quote
 ├── gpu-attest/
 │   ├── gpu_local_attest.sh # GPU attestation script (run by GET /gpu-attestation)
@@ -194,7 +232,7 @@ workspace/
     ├── test_tpm_integration.sh  # real simulator: measure, PCR, quote, verify
     ├── test_tpm_web.sh          # end-to-end curl test of the TPM + combined endpoints
     ├── test_attestation_all.rs  # combined /attestation_all + /verify_all validation
-    ├── test_gpu_attestation.rs  # /gpu-attestation returns the script output
+    ├── test_gpu_attestation.rs  # /gpu-attestation returns the parsed script output
     ├── test_gpu_web.sh          # end-to-end curl test of /gpu-attestation
     └── test_logging.rs          # audit log: events, error quoting, panic capture
 ```

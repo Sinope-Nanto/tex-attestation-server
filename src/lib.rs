@@ -36,7 +36,8 @@ pub use attestation::{
 };
 pub use gpu::{
     default_gpu_attest_script, gpu_attest_script_path, gpu_attestation as run_gpu_attestation,
-    GpuAttestationResponse, GpuError, DEFAULT_GPU_ATTEST_SCRIPT, ENV_GPU_ATTEST_SCRIPT,
+    parse_gpu_attestation, GpuAttestation, GpuAttestationResponse, GpuCertChain, GpuDevice,
+    GpuError, DEFAULT_GPU_ATTEST_SCRIPT, ENV_GPU_ATTEST_SCRIPT,
 };
 pub use report::{
     parse_tdreport, ParseReportRequest, ParseReportResponse, ReportMacStruct, TdInfo, TeeTcbInfo,

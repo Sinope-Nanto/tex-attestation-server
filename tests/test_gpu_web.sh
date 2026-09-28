@@ -5,11 +5,12 @@
 #
 # Endpoint taken from src/api.rs:
 #
-#   GET  /gpu-attestation   -> 200 {"gpu-attestation":"<script output>"}
+#   GET  /gpu-attestation   -> 200 {"gpu-attestation":{...parsed...}}
 #
-# The endpoint runs gpu-attest/gpu_local_attest.sh and returns its output
-# verbatim in the `gpu-attestation` field. This test checks that the response is
-# a JSON object carrying exactly that field, and that the field is non-empty.
+# The endpoint runs gpu-attest/gpu_local_attest.sh and returns its output parsed
+# into a structured JSON document in the `gpu-attestation` field. This test
+# checks that the response is a JSON object carrying that field as a JSON object
+# with a `successful` boolean.
 #
 # Environment:
 #   WEB_BASE_URL   base URL of a *running* service (default http://127.0.0.1:8000)
@@ -105,17 +106,18 @@ else
     info "body: $(head -c 300 /tmp/gpu_attestation.json 2>/dev/null)"
 fi
 
-# The body must be a JSON object carrying a non-empty `gpu-attestation` string.
+# The body must be a JSON object carrying a parsed `gpu-attestation` object.
 if python3 -c '
 import json, sys
 with open("/tmp/gpu_attestation.json") as fh:
     payload = json.load(fh)
 value = payload.get("gpu-attestation")
-assert isinstance(value, str) and value.strip(), "missing or empty gpu-attestation"
+assert isinstance(value, dict), "gpu-attestation must be a JSON object"
+assert isinstance(value.get("successful"), bool), "missing 'successful' boolean"
 ' 2>/dev/null; then
-    ok "body carries a non-empty 'gpu-attestation' string"
+    ok "body carries a parsed 'gpu-attestation' object"
 else
-    bad "body does not carry a non-empty 'gpu-attestation' string"
+    bad "body does not carry a parsed 'gpu-attestation' object"
     info "body: $(head -c 300 /tmp/gpu_attestation.json 2>/dev/null)"
 fi
 

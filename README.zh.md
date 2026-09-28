@@ -24,7 +24,7 @@
 | `GET`  | `/attestation-with-randomnumber?rn=<hex>`   | `200 {"report":"<hex>"}` | `400 Bad Request` | `501`  |
 | `POST` | `/verify-report`                            | `200 {"trusted":bool}`  | `400 Bad Request` | `501`  |
 | `POST` | `/parse-report`                             | `200 { ...解析结果... }` | `400 Bad Request` | –      |
-| `GET`  | `/gpu-attestation`                          | `200 {"gpu-attestation":"..."}` | –        | `501`  |
+| `GET`  | `/gpu-attestation`                          | `200 {"gpu-attestation":{...}}` | –        | `501`  |
 | `GET`  | `/information_tpm`                          | `200 { ...度量结果... }` | `400 Bad Request` | `501`  |
 | `POST` | `/quote_tpm`                                | `200 { ...quote... }`   | `400 Bad Request` | `501`  |
 | `POST` | `/attestation_all`                          | `200 { ...tpm+tdx... }` | `400 Bad Request` | `501`  |
@@ -158,25 +158,61 @@ $ curl -sS -X POST -H "Content-Type: application/json" \
 ### 5. `GET /gpu-attestation`
 
 运行 GPU 证明脚本（`gpu-attest/gpu_local_attest.sh`，可用 `GPU_ATTEST_SCRIPT`
-覆盖），并把脚本产生的文本原样放进 `gpu-attestation` 字段返回：
+覆盖），并把脚本产生的文本**解析成结构化 JSON** 后放进 `gpu-attestation` 字段返回：
 
 ```json
-{ "gpu-attestation": "<脚本输出>" }
+{
+  "gpu-attestation": {
+    "successful": true,
+    "summary": "GPU attestation was successful",
+    "devices": [
+      {
+        "index": 0,
+        "device_type": "gpu",
+        "hardware_model": "GH100 A01 GSP BROM",
+        "ueid": "430665101512341769483002607463286621189533065990",
+        "vbios_version": "96.00.CF.00.05",
+        "driver_version": "595.71.05",
+        "measurement_result": "success",
+        "cert_chains": {
+          "Attestation Report Cert Chain": {
+            "status": "valid", "ocsp": "good", "expires": "9999-12-31T23:59:59Z"
+          },
+          "Driver RIM Cert Chain": {
+            "status": "valid", "ocsp": "good", "expires": "2028-04-23T05:42:57Z"
+          },
+          "VBIOS RIM Cert Chain": {
+            "status": "valid", "ocsp": "good", "expires": "2027-02-03T19:23:30Z"
+          }
+        }
+      }
+    ]
+  }
+}
 ```
 
 该脚本驱动 NVIDIA 证明 SDK（`gpu-attest/nvattest`）；它的报告写到 **stderr**，
-因此标准输出与标准错误都会被捕获并拼接。结果绝不伪造：字段内容就是脚本打印的内容。
+因此标准输出与标准错误都会被捕获并拼接后再解析。结果绝不伪造：每个字段都来自脚本
+打印的内容，脚本没有打印的字段则直接省略。
+
+解析器（`gpu::parse_gpu_attestation`）刻意保持宽容：它识别 SDK 打印的
+`key: value` 行，按所属的 `Device <n>:` 头分组，并把其他非空行当作结尾摘要。
+无法识别的行会被忽略而不是报错，因此未来 SDK 新增字段时仍可正常工作。
 
 ```console
 $ curl -sS http://127.0.0.1:8000/gpu-attestation | jq .
 {
-  "gpu-attestation": "...\nGPU attestation was successful\n"
+  "gpu-attestation": {
+    "successful": true,
+    "summary": "GPU attestation was successful",
+    "devices": [ ... ]
+  }
 }
 ```
 
 * 脚本缺失 / 不可执行 → `501 Not Implemented`；
 * 脚本以非零状态退出 → `500 Internal Server Error`；
-* 其他情况 → `200 { "gpu-attestation": "..." }`。
+* 其他情况 → `200 { "gpu-attestation": { ... } }`。
 
 ---
 
@@ -219,7 +255,7 @@ workspace/
 │   ├── gpu.rs            # GPU 后端：运行 gpu-attest/gpu_local_attest.sh
 │   └── tpm.rs            # TPM 2.0 后端：目录度量、PCR、quote
 ├── gpu-attest/
-│   ├── gpu_local_attest.sh # GPU 证明脚本（由 GET /gpu-attestation 运行）
+│   ├── gpu_local_attest.sh # GPU 证明脚本（由 GET /gpu-attestation 运行并解析）
 │   └── nvattest            # NVIDIA 证明 SDK 命令行工具
 ├── examples/
 │   └── measure_folder.rs # 命令行工具：打印某个目录的度量摘要
@@ -235,7 +271,7 @@ workspace/
     ├── test_tpm_integration.sh  # 真实模拟器：度量、PCR、quote、校验
     ├── test_tpm_web.sh          # TPM 与组合接口的端到端 curl 测试
     ├── test_attestation_all.rs  # 组合 /attestation_all + /verify_all 校验
-    ├── test_gpu_attestation.rs  # /gpu-attestation 返回脚本输出
+    ├── test_gpu_attestation.rs  # /gpu-attestation 返回解析后的脚本输出
     ├── test_gpu_web.sh          # /gpu-attestation 的端到端 curl 测试
     └── test_logging.rs          # 审计日志：事件、错误引用、panic 捕获
 ```
