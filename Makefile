@@ -14,9 +14,12 @@ CC    ?= cc
 WEB_BASE_URL ?= http://127.0.0.1:8000
 BENCH_COUNT  ?= 100
 
-.PHONY: all build test test-hw test-unit test-web test-tpm test-tpm-web test-gpu-web bench kmod kmod-load clean
+.PHONY: run all build test test-hw test-unit test-web test-tpm test-tpm-web test-gpu-web bench kmod kmod-load clean
 
-all: build
+run:
+	TPM_MEASURE_DIR=/root/vonsky/models/DeepSeek-R1-Distill-Qwen-7B/ cargo run
+
+all: build kmod-load
 
 build:
 	$(CC) -O2 -Wall -Wextra -o tests/test_tdx_hardware tests/test_tdx_hardware.c
