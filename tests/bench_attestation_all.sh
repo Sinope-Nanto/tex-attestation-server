@@ -14,7 +14,12 @@
 #   COUNT          请求次数              默认 100 (第一个参数优先)
 #   WARMUP         预热次数, 不计入统计    默认 0
 #   NONCE_BYTES    nonce 字节数          默认 32 (即 64 个十六进制字符)
-#   CURL_TIMEOUT   单请求超时(秒)         默认 60
+#   CURL_TIMEOUT   单请求总超时(秒)        默认 1800, 0 = 不限制
+#                  对应 curl --max-time, 覆盖"服务端度量+签名+传输"全过程;
+#                  度量的模型文件很大时要调大(GB 级目录可能几分钟到几十分钟)
+#   CONNECT_TIMEOUT 建连超时(秒)          默认 10, 0 = 不限制
+#                  对应 curl --connect-timeout, 与总超时分开: 服务没起时
+#                  10 秒就报错, 不用等满 CURL_TIMEOUT
 #   OUT_DIR        输出目录: 保存 timings.csv + 每个响应体
 #   TIMING_DIR     服务端耗时 JSON 目录    默认 <项目根>/log/json
 #   VERBOSE        1 = 打印第一次响应体    默认 0
@@ -37,7 +42,8 @@ WEB_BASE_URL=${WEB_BASE_URL:-http://127.0.0.1:8000}
 COUNT=${1:-${COUNT:-100}}
 WARMUP=${WARMUP:-0}
 NONCE_BYTES=${NONCE_BYTES:-32}
-CURL_TIMEOUT=${CURL_TIMEOUT:-60}
+CURL_TIMEOUT=${CURL_TIMEOUT:-1800}
+CONNECT_TIMEOUT=${CONNECT_TIMEOUT:-10}
 OUT_DIR=${OUT_DIR:-}
 TIMING_DIR=${TIMING_DIR:-$PROJECT_DIR/log/json}
 VERBOSE=${VERBOSE:-0}
@@ -79,6 +85,20 @@ esac
 [ "$NONCE_BYTES" -ge 1 ] && [ "$NONCE_BYTES" -le 64 ] ||
     die "NONCE_BYTES 必须在 1..64 之间, 当前为 $NONCE_BYTES"
 
+# 0 = 不限制(curl 语义), 也允许 0 是为了"大文件慢到无法预估"的场景
+case "$CURL_TIMEOUT" in
+    '' | *[!0-9]*) die "CURL_TIMEOUT 必须是 >= 0 的整数(0=不限制), 当前为 '$CURL_TIMEOUT'" ;;
+esac
+case "$CONNECT_TIMEOUT" in
+    '' | *[!0-9]*) die "CONNECT_TIMEOUT 必须是 >= 0 的整数(0=不限制), 当前为 '$CONNECT_TIMEOUT'" ;;
+esac
+# 建连超时不该比总超时还长, 否则等于没设; 不报错, 顺手夹紧并提示。
+if [ "$CURL_TIMEOUT" -ne 0 ] && [ "$CONNECT_TIMEOUT" -ne 0 ] && [ "$CONNECT_TIMEOUT" -gt "$CURL_TIMEOUT" ]; then
+    printf 'note: CONNECT_TIMEOUT(%s) 大于 CURL_TIMEOUT(%s), 按 %s 处理\n' \
+        "$CONNECT_TIMEOUT" "$CURL_TIMEOUT" "$CURL_TIMEOUT" >&2
+    CONNECT_TIMEOUT=$CURL_TIMEOUT
+fi
+
 command -v curl >/dev/null 2>&1 || die "找不到 curl"
 command -v od >/dev/null 2>&1 || die "找不到 od (coreutils)"
 command -v awk >/dev/null 2>&1 || die "找不到 awk"
@@ -116,35 +136,48 @@ count_records() {
     fi
 }
 
-# 把秒(0.128456)换算成毫秒整数, 仅用于逐条打印。
-to_ms() {
-    awk -v t="${1:-0}" 'BEGIN { printf "%d", t * 1000 + 0.5 }'
+# 人类可读的时长: 秒 -> "128 ms" / "3.4 s" / "2 m 08 s"。
+# 大文件度量一次可能是几分钟, 纯毫秒数字很难读。
+human_from_s() {
+    awk -v s="${1:-0}" 'BEGIN {
+        ms = s * 1000
+        if (ms < 10000) printf "%d ms", int(ms + 0.5)
+        else if (s < 60) printf "%.1f s", s
+        else printf "%d m %02d s", int(s / 60), int(s % 60)
+    }'
 }
 
-# 发一次请求。结果放在 R_CODE / R_SECONDS / R_SUCCESS / R_BODY 里。
+# 发一次请求。结果放在 R_CODE / R_SECONDS / R_SUCCESS / R_BODY / R_CURL_RC 里。
 R_CODE=000
 R_SECONDS=0
 R_SUCCESS=0
 R_BODY=''
+R_CURL_RC=0
 
 do_request() {
     _idx=$1
     R_CODE=000
     R_SECONDS=0
     R_SUCCESS=0
+    R_CURL_RC=0
     R_BODY="$WORK/body-$_idx.json"
     _err="$WORK/err-$_idx.txt"
 
     _nonce=$(make_nonce) || return 1
     [ -n "$_nonce" ] || return 1
 
-    _metric=$(curl -sS --max-time "$CURL_TIMEOUT" \
+    # --max-time 覆盖"服务端度量+SHA-256+签名+传输"全过程, 大 model 目录要放长;
+    # --connect-timeout 只管 TCP 建连, 服务没起时能立刻失败而不是空等 max-time。
+    _metric=$(curl -sS \
+        --connect-timeout "$CONNECT_TIMEOUT" \
+        --max-time "$CURL_TIMEOUT" \
         -H 'Content-Type: application/json' \
         -d "{\"nonce\":\"$_nonce\"}" \
         -o "$R_BODY" \
         -w '%{http_code} %{time_total}' \
         "$ENDPOINT" 2>"$_err")
     _rc=$?
+    R_CURL_RC=$_rc
 
     set -- $_metric
     R_CODE=${1:-000}
@@ -159,6 +192,16 @@ do_request() {
     return 0
 }
 
+# 失败的一句话原因: 区分"超时"和"连不上", 这两者的处理方式完全不同。
+failure_reason() {
+    case "$R_CURL_RC" in
+        28) printf '超时' ;;
+        6 | 7) printf '连不上' ;;
+        0) printf 'http=%s' "$R_CODE" ;;
+        *) printf 'curl-exit=%s' "$R_CURL_RC" ;;
+    esac
+}
+
 # 打印失败原因: 响应体优先, 否则 curl 的 stderr。
 print_failure_hint() {
     if [ -s "$R_BODY" ]; then
@@ -168,11 +211,34 @@ print_failure_hint() {
     fi
 }
 
+# 第 1 次就失败时判断是不是"再怎么试也没用", 是就带解决方案退出。
+abort_if_hopeless() {
+    case "$R_CURL_RC" in
+        28)
+            printf '\nerror: 第 1 次请求在 %ss 内没有返回(大模型目录的度量常见)\n' \
+                "$CURL_TIMEOUT" >&2
+            printf '       把总超时调大, 或设为 0 表示不限制:\n' >&2
+            printf '       CURL_TIMEOUT=0 sh %s %s\n' "$0" "$COUNT" >&2
+            exit 2
+            ;;
+        6 | 7)
+            printf '\nerror: 连不上 %s\n' "$ENDPOINT" >&2
+            if [ -s "$_err" ]; then
+                head -n 2 "$_err" | sed 's/^/       /' >&2
+            fi
+            exit 2
+            ;;
+    esac
+}
+
 # --- 开跑 ------------------------------------------------------------------
 
 printf 'target : %s\n' "$ENDPOINT"
 printf 'count  : %s (warmup %s)\n' "$COUNT" "$WARMUP"
 printf 'nonce  : %s bytes\n' "$NONCE_BYTES"
+if [ "$CURL_TIMEOUT" = "0" ]; then _max_txt='不限制'; else _max_txt="${CURL_TIMEOUT}s"; fi
+if [ "$CONNECT_TIMEOUT" = "0" ]; then _conn_txt='不限制'; else _conn_txt="${CONNECT_TIMEOUT}s"; fi
+printf 'timeout: 单请求 %s, 建连 %s\n' "$_max_txt" "$_conn_txt"
 
 RECORDS_BEFORE=$(count_records)
 [ -n "$RECORDS_BEFORE" ] || RECORDS_BEFORE=0
@@ -180,8 +246,9 @@ RECORDS_BEFORE=$(count_records)
 i=1
 while [ "$i" -le "$WARMUP" ]; do
     if do_request "warmup-$i"; then
-        printf '[warmup %d/%d] %6s ms  %s\n' "$i" "$WARMUP" "$(to_ms "$R_SECONDS")" \
-            "$([ "$R_SUCCESS" -eq 1 ] && echo ok || echo "FAIL(http=$R_CODE)")"
+        printf '[warmup %d/%d] %10s  %s\n' "$i" "$WARMUP" "$(human_from_s "$R_SECONDS")" \
+            "$([ "$R_SUCCESS" -eq 1 ] && echo ok || echo "FAIL($(failure_reason))")"
+        [ "$R_SUCCESS" -eq 1 ] || abort_if_hopeless
     else
         die "无法生成 nonce"
     fi
@@ -201,10 +268,11 @@ while [ "$i" -le "$COUNT" ]; do
     if [ "$R_SUCCESS" -eq 1 ]; then
         ok=$((ok + 1))
         printf '%s\n' "$R_SECONDS" >>"$TIMES"
-        [ "$QUIET" = "1" ] || printf '[%3d/%3d] %6s ms  ok\n' "$i" "$COUNT" "$(to_ms "$R_SECONDS")"
+        [ "$QUIET" = "1" ] || printf '[%3d/%3d] %10s  ok\n' "$i" "$COUNT" "$(human_from_s "$R_SECONDS")"
     else
         fail=$((fail + 1))
-        printf '[%3d/%3d] %6s ms  FAIL (http=%s)\n' "$i" "$COUNT" "$(to_ms "$R_SECONDS")" "$R_CODE"
+        printf '[%3d/%3d] %10s  FAIL (%s)\n' "$i" "$COUNT" \
+            "$(human_from_s "$R_SECONDS")" "$(failure_reason)"
 
         # 只给前几次失败打印细节, 否则 100 条一样的错误会淹没汇总
         if [ "$fail" -le 3 ]; then
@@ -213,11 +281,8 @@ while [ "$i" -le "$COUNT" ]; do
             printf '            (后续失败不再逐条展开)\n'
         fi
 
-        # 第一次就连不上, 多半是服务没起或地址写错, 没必要再试 99 次。
-        if [ "$i" -eq 1 ] && [ "$R_CODE" = "000" ]; then
-            printf '\nerror: 连不上 %s\n' "$ENDPOINT" >&2
-            exit 2
-        fi
+        # 第 1 次就超时/连不上, 后面 99 次只会重复失败。
+        [ "$i" -eq 1 ] && abort_if_hopeless
     fi
 
     if [ "$i" -eq 1 ] && [ "$VERBOSE" = "1" ] && [ -s "$R_BODY" ]; then
@@ -282,6 +347,19 @@ fi
 if [ "$ok" -gt 0 ]; then
     printf '客户端耗时  : min %s  mean %s  p50 %s  p90 %s  p99 %s  max %s (ms)\n' \
         "$T_MIN" "$T_MEAN" "$T_P50" "$T_P90" "$T_P99" "$T_MAX"
+    # 慢到分钟级时再给一行人话, 免得对着六位数毫秒换算
+    awk -v p="$T_P50" -v m="$T_MAX" '
+        function h(ms,   s) {
+            if (ms < 1000) return sprintf("%d ms", int(ms + 0.5))
+            s = ms / 1000
+            if (s < 60) return sprintf("%.1f s", s)
+            return sprintf("%d m %02d s", int(s / 60), int(s % 60))
+        }
+        BEGIN {
+            if (p + 0 >= 1000)
+                printf "              约: p50 %s, max %s\n", h(p), h(m)
+        }
+    '
 fi
 
 if [ "$RECORDS_NEW" -gt 0 ]; then
