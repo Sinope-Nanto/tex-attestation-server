@@ -12,8 +12,9 @@ CARGO ?= cargo
 CC    ?= cc
 
 WEB_BASE_URL ?= http://127.0.0.1:8000
+BENCH_COUNT  ?= 100
 
-.PHONY: all build test test-hw test-unit test-web test-tpm test-tpm-web test-gpu-web kmod kmod-load clean
+.PHONY: all build test test-hw test-unit test-web test-tpm test-tpm-web test-gpu-web bench kmod kmod-load clean
 
 all: build
 
@@ -42,9 +43,13 @@ test-tpm:
 test-tpm-web:
 	WEB_BASE_URL=$(WEB_BASE_URL) bash tests/test_tpm_web.sh
 
-# curl(1) end-to-end test of the GPU attestation endpoint.
+# curl(1) end-to-end test of the GPU attestation endpoints.
 test-gpu-web:
 	WEB_BASE_URL=$(WEB_BASE_URL) bash tests/test_gpu_web.sh
+
+# Latency benchmark: N consecutive POST /attestation_all requests (BENCH_COUNT).
+bench:
+	WEB_BASE_URL=$(WEB_BASE_URL) bash tests/bench_attestation_all.sh $(BENCH_COUNT)
 
 test: test-hw test-unit test-web test-tpm test-tpm-web test-gpu-web
 
