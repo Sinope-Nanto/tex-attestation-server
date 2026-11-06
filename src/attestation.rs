@@ -232,6 +232,8 @@ pub fn generate_tdx_report(random_number: &[u8]) -> Result<Vec<u8>, AttestationE
         tdreport: [0u8; TDREPORT_LEN],
     };
 
+    #[cfg(debug_assertions)]
+    let _g_ioctl = crate::metrics::unit("ioctl_get_report_us");
     ioctl(
         file.as_raw_fd(),
         TDX_CMD_GET_REPORT0,
@@ -242,6 +244,8 @@ pub fn generate_tdx_report(random_number: &[u8]) -> Result<Vec<u8>, AttestationE
             "TDCALL[TDG.MR.REPORT] failed via {TDX_GUEST_DEVICE}: {err}"
         ))
     })?;
+    #[cfg(debug_assertions)]
+    _g_ioctl.end();
 
     Ok(req.tdreport.to_vec())
 }
@@ -303,6 +307,8 @@ pub fn verify_tdx_report_hardware(report: &[u8]) -> Result<u64, AttestationError
     };
     req.report.copy_from_slice(report);
 
+    #[cfg(debug_assertions)]
+    let _g_ioctl = crate::metrics::unit("ioctl_verify_report_us");
     ioctl(
         file.as_raw_fd(),
         TDX_VERIFY_REPORT,
@@ -313,6 +319,8 @@ pub fn verify_tdx_report_hardware(report: &[u8]) -> Result<u64, AttestationError
             "TDCALL[TDG.MR.VERIFYREPORT] (leaf {TDG_MR_VERIFYREPORT_LEAF}) failed via {TDX_VERIFY_DEVICE}: {err}"
         ))
     })?;
+    #[cfg(debug_assertions)]
+    _g_ioctl.end();
 
     Ok(req.status)
 }

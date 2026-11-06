@@ -326,6 +326,36 @@ and logging degrades to a no-op - logging must never be the reason a request
 fails. The implementation is in [`src/logging.rs`](src/logging.rs) and is covered
 by [`tests/test_logging.rs`](tests/test_logging.rs).
 
+### Latency records (debug builds only)
+
+In a **debug** build every request also writes one JSON file to `log/json/`
+recording where its time went - end-to-end server latency, the mutually
+exclusive `stages`, the finer-grained `units` (one entry per `tpm2-*` call, the
+folder walk, the TDX ioctl, ...), plus the counters `files_measured` /
+`bytes_measured`:
+
+```json
+{
+  "ts": "2026-11-06T07:04:51Z",
+  "route": "/attestation_all",
+  "http_status": 200,
+  "warm": true,
+  "concurrency": 1,
+  "e2e_server_us": 128400,
+  "e2e_client_us": null,
+  "stages": { "lock_wait_us": 12, "create_quote_us": 62400, "...": 0 },
+  "units": { "tpm2_quote_us": 25600, "files_measured": 6, "...": 0 },
+  "unattributed_us": -1288,
+  "checksum_ok": true
+}
+```
+
+Release builds compile all of this away: no timer, no allocation, no file I/O.
+The field-by-field contract, how each value is measured and which ones cannot be
+observed from inside a handler are documented in
+[`docs/attestation-sample-record-fields.md`](docs/attestation-sample-record-fields.md);
+`TDX_TIMING_DIR` redirects the output directory (`<project>/log/json` by default).
+
 ## Test
 
 ```console

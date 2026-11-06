@@ -518,6 +518,9 @@ pub struct VerifyAllResponse {
 /// * [`TpmError::Internal`] - `root` does not exist, is not a directory, or a
 ///   path below it could not be read.
 pub fn measure_folder(root: &Path) -> Result<FolderMeasurement, TpmError> {
+    #[cfg(debug_assertions)]
+    let _g_folder = crate::metrics::unit("measure_folder_us");
+
     let metadata = fs::metadata(root).map_err(|err| {
         TpmError::Internal(format!(
             "measured directory {} cannot be read: {err}",
@@ -539,7 +542,11 @@ pub fn measure_folder(root: &Path) -> Result<FolderMeasurement, TpmError> {
     })?;
 
     let mut files: Vec<PathBuf> = Vec::new();
+    #[cfg(debug_assertions)]
+    let _g_walk = crate::metrics::unit("collect_regular_files_us");
     collect_regular_files(&root, &root, &mut files)?;
+    #[cfg(debug_assertions)]
+    _g_walk.end();
 
     let mut entries: Vec<(String, PathBuf)> = files
         .into_iter()
@@ -559,6 +566,11 @@ pub fn measure_folder(root: &Path) -> Result<FolderMeasurement, TpmError> {
     let mut total = Sha256::new();
     let mut measurement = Vec::with_capacity(entries.len());
 
+    #[cfg(debug_assertions)]
+    let mut total_bytes: u64 = 0;
+    #[cfg(debug_assertions)]
+    let _g_read = crate::metrics::unit("read_and_hash_loop_us");
+
     for (name, path) in entries {
         let contents = fs::read(&path).map_err(|err| {
             TpmError::Internal(format!(
@@ -572,11 +584,25 @@ pub fn measure_folder(root: &Path) -> Result<FolderMeasurement, TpmError> {
         total.update(name.as_bytes());
         total.update(digest);
 
+        #[cfg(debug_assertions)]
+        {
+            total_bytes += contents.len() as u64;
+        }
+
         measurement.push(MeasuredFile {
             name,
             hash: hex::encode(digest),
             size: contents.len() as u64,
         });
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        _g_read.end();
+        // Counters, not durations: they give the per-file / per-byte cost the
+        // raw microsecond numbers alone cannot express.
+        crate::metrics::count("files_measured", measurement.len() as u64);
+        crate::metrics::count("bytes_measured", total_bytes);
     }
 
     Ok(FolderMeasurement {
@@ -755,6 +781,13 @@ pub fn normalize_nonce(nonce_hex: &str) -> Result<(String, usize), TpmError> {
 
 /// Runs one `tpm2-*` command against the configured TPM.
 fn tpm2(config: &TpmConfig, subcommand: &str, args: &[&str]) -> Result<String, TpmError> {
+    // One unit per `tpm2-*` invocation: the span covers `fork/exec`, TSS2
+    // initialisation, the TCTI connection, the command round trip and reading
+    // the output pipe - i.e. the whole cost of the CLI call, not the TPM's
+    // internal computation time.
+    #[cfg(debug_assertions)]
+    let _g_cmd = crate::metrics::unit(format!("tpm2_{subcommand}_us"));
+
     let binary = format!("tpm2_{subcommand}");
     let tcti = format!("--tcti={}", config.tcti);
 
@@ -911,6 +944,10 @@ fn ensure_ak(config: &TpmConfig, scratch: &Scratch) -> Result<(), TpmError> {
         return Ok(());
     }
 
+    // The key has to be created: from here on the request is a cold one.
+    #[cfg(debug_assertions)]
+    crate::metrics::mark_cold();
+
     info!(
         "Attestation Key {} is missing; creating and persisting one",
         config.ak_handle
@@ -958,6 +995,10 @@ fn ak_pubkey(
     if let Some(cached) = &inner.ak_pubkey {
         return Ok(cached.clone());
     }
+
+    // A cache miss means this request pays for `tpm2_readpublic`.
+    #[cfg(debug_assertions)]
+    crate::metrics::mark_cold();
 
     flush_transient(config);
     let path = scratch.arg("ak.pem")?;
@@ -1107,12 +1148,28 @@ impl FolderMeasurement {
 /// * [`TpmError::NotImplemented`] - the simulator is not reachable.
 /// * [`TpmError::Internal`] - the measurement or a PCR operation failed.
 pub fn information_tpm(state: &TpmState) -> Result<InformationTpmResponse, TpmError> {
+    #[cfg(debug_assertions)]
+    let _g_lock = crate::metrics::span("lock_wait_us");
     let mut inner = state.lock();
+    #[cfg(debug_assertions)]
+    _g_lock.end();
+
     let config = state.config();
+
+    #[cfg(debug_assertions)]
+    let _g_scratch = crate::metrics::span("scratch_new_us");
     let scratch = Scratch::new()?;
+    #[cfg(debug_assertions)]
+    _g_scratch.end();
 
+    #[cfg(debug_assertions)]
+    let _g_cycle = crate::metrics::span("measure_and_extend_us");
     let (measurement, pcr_value) = measure_and_extend(config, &scratch)?;
+    #[cfg(debug_assertions)]
+    _g_cycle.end();
 
+    #[cfg(debug_assertions)]
+    let _g_ak = crate::metrics::span("ensure_ak_us");
     let ak_pubkey =
         match ensure_ak(config, &scratch).and_then(|()| ak_pubkey(config, &mut inner, &scratch)) {
             Ok(pem) => Some(pem),
@@ -1121,6 +1178,8 @@ pub fn information_tpm(state: &TpmState) -> Result<InformationTpmResponse, TpmEr
                 None
             }
         };
+    #[cfg(debug_assertions)]
+    _g_ak.end();
 
     Ok(InformationTpmResponse {
         backend: BACKEND_NAME.to_string(),
@@ -1149,29 +1208,61 @@ pub fn information_tpm(state: &TpmState) -> Result<InformationTpmResponse, TpmEr
 /// * [`TpmError::Internal`] - the measurement, a PCR operation or the quote
 ///   failed.
 pub fn quote_tpm(state: &TpmState, nonce_hex: &str) -> Result<QuoteTpmResponse, TpmError> {
+    #[cfg(debug_assertions)]
+    let _g_nonce = crate::metrics::span("nonce_validate_us");
     let (nonce, nonce_size) = normalize_nonce(nonce_hex)?;
+    #[cfg(debug_assertions)]
+    _g_nonce.end();
 
+    #[cfg(debug_assertions)]
+    let _g_lock = crate::metrics::span("lock_wait_us");
     let mut inner = state.lock();
-    let config = state.config();
-    let scratch = Scratch::new()?;
+    #[cfg(debug_assertions)]
+    _g_lock.end();
 
+    let config = state.config();
+
+    #[cfg(debug_assertions)]
+    let _g_scratch = crate::metrics::span("scratch_new_us");
+    let scratch = Scratch::new()?;
+    #[cfg(debug_assertions)]
+    _g_scratch.end();
+
+    #[cfg(debug_assertions)]
+    let _g_cycle = crate::metrics::span("measure_and_extend_us");
     let (measurement, pcr_value) = measure_and_extend(config, &scratch)?;
+    #[cfg(debug_assertions)]
+    _g_cycle.end();
 
     info!(
         "TPM quote start: ak={} pcr={} challenge_bytes={}",
         config.ak_handle, config.pcr_index, nonce_size
     );
+    #[cfg(debug_assertions)]
+    let _g_ak = crate::metrics::span("ensure_ak_us");
     ensure_ak(config, &scratch)?;
+    #[cfg(debug_assertions)]
+    _g_ak.end();
+
+    #[cfg(debug_assertions)]
+    let _g_quote = crate::metrics::span("create_quote_us");
     let (evidence, _) = create_quote(config, &nonce, &scratch)?;
+    #[cfg(debug_assertions)]
+    _g_quote.end();
+
     info!(
         "TPM quote completed: quote_size={} signature_size={} message_size={}",
         evidence.quote_size, evidence.signature_size, evidence.message_size
     );
 
+    #[cfg(debug_assertions)]
+    let _g_pub = crate::metrics::span("ak_pubkey_us");
     let ak_pubkey = ak_pubkey(config, &mut inner, &scratch).unwrap_or_else(|err| {
         warn!("Attestation Key public part is unavailable: {err}");
         String::new()
     });
+    #[cfg(debug_assertions)]
+    _g_pub.end();
 
     Ok(QuoteTpmResponse {
         status: RC_SUCCESS,
@@ -1214,20 +1305,49 @@ pub fn attestation_all(
     state: &TpmState,
     nonce_hex: &str,
 ) -> Result<AttestationAllResponse, TpmError> {
+    #[cfg(debug_assertions)]
+    let _g_nonce = crate::metrics::span("nonce_validate_us");
     let (nonce, nonce_size) = normalize_nonce(nonce_hex)?;
+    #[cfg(debug_assertions)]
+    _g_nonce.end();
 
+    // Taking the process-wide TPM lock is pure queueing, not TPM work: the
+    // measurement plan requires it to be reported separately.
+    #[cfg(debug_assertions)]
+    let _g_lock = crate::metrics::span("lock_wait_us");
     let mut inner = state.lock();
-    let config = state.config();
-    let scratch = Scratch::new()?;
+    #[cfg(debug_assertions)]
+    _g_lock.end();
 
+    let config = state.config();
+
+    #[cfg(debug_assertions)]
+    let _g_scratch = crate::metrics::span("scratch_new_us");
+    let scratch = Scratch::new()?;
+    #[cfg(debug_assertions)]
+    _g_scratch.end();
+
+    #[cfg(debug_assertions)]
+    let _g_cycle = crate::metrics::span("measure_and_extend_us");
     let (measurement, pcr_value) = measure_and_extend(config, &scratch)?;
+    #[cfg(debug_assertions)]
+    _g_cycle.end();
 
     info!(
         "combined attestation: TPM quote start ak={} pcr={} challenge_bytes={}",
         config.ak_handle, config.pcr_index, nonce_size
     );
+    #[cfg(debug_assertions)]
+    let _g_ak = crate::metrics::span("ensure_ak_us");
     ensure_ak(config, &scratch)?;
+    #[cfg(debug_assertions)]
+    _g_ak.end();
+
+    #[cfg(debug_assertions)]
+    let _g_quote = crate::metrics::span("create_quote_us");
     let (tpm_evidence, _) = create_quote(config, &nonce, &scratch)?;
+    #[cfg(debug_assertions)]
+    _g_quote.end();
 
     // The TDX report is bound to the very same challenge: the nonce is decoded
     // from its canonical hex form and zero-padded to REPORTDATA by the backend.
@@ -1237,7 +1357,11 @@ pub fn attestation_all(
         "combined attestation: TDX report start challenge_bytes={}",
         nonce_bytes.len()
     );
+    #[cfg(debug_assertions)]
+    let _g_tdx = crate::metrics::span("tdx_report_us");
     let report = generate_tdx_report(&nonce_bytes)?;
+    #[cfg(debug_assertions)]
+    _g_tdx.end();
     info!(
         "combined attestation: TDX report completed report_bytes={}",
         report.len()
@@ -1249,10 +1373,14 @@ pub fn attestation_all(
         nonce_size,
     };
 
+    #[cfg(debug_assertions)]
+    let _g_pub = crate::metrics::span("ak_pubkey_us");
     let ak_pubkey = ak_pubkey(config, &mut inner, &scratch).unwrap_or_else(|err| {
         warn!("Attestation Key public part is unavailable: {err}");
         String::new()
     });
+    #[cfg(debug_assertions)]
+    _g_pub.end();
 
     Ok(AttestationAllResponse {
         status: RC_SUCCESS,
@@ -1295,12 +1423,25 @@ pub fn verify_all(
         TpmError::InvalidInput("the evidence block has no 'tdx' field".to_string())
     })?;
 
+    #[cfg(debug_assertions)]
+    let _g_decode = crate::metrics::span("report_decode_us");
     let report = hex::decode(&tdx.report).map_err(|err| {
         TpmError::InvalidInput(format!("'evidence.tdx.report' is not valid hex: {err}"))
     })?;
-    let tdx_trusted = verify_tdx_report(&report)?;
+    #[cfg(debug_assertions)]
+    _g_decode.end();
 
+    #[cfg(debug_assertions)]
+    let _g_tdx = crate::metrics::span("tdx_verify_us");
+    let tdx_trusted = verify_tdx_report(&report)?;
+    #[cfg(debug_assertions)]
+    _g_tdx.end();
+
+    #[cfg(debug_assertions)]
+    let _g_tpm = crate::metrics::span("tpm_verify_us");
     let tpm_trusted = verify_quote(state, request)?;
+    #[cfg(debug_assertions)]
+    _g_tpm.end();
 
     Ok(VerifyAllResponse {
         trusted: tpm_trusted && tdx_trusted,
@@ -1323,13 +1464,19 @@ fn verify_quote(state: &TpmState, request: &AttestationAllResponse) -> Result<bo
 
     let evidence = &request.evidence.tpm;
 
+    #[cfg(debug_assertions)]
+    let _g_decode = crate::metrics::unit("decode_blob_us");
     let signature = decode_blob(&evidence.signature)?;
     let message = decode_blob(&evidence.message)?;
+    #[cfg(debug_assertions)]
+    _g_decode.end();
 
     let sig_path = scratch.arg("verify.sig")?;
     let msg_path = scratch.arg("verify.msg")?;
     let ak_path = scratch.arg("verify.ak.pem")?;
 
+    #[cfg(debug_assertions)]
+    let _g_write = crate::metrics::unit("verify_write_us");
     fs::write(&sig_path, &signature)
         .map_err(|err| TpmError::Internal(format!("quote signature cannot be written: {err}")))?;
     fs::write(&msg_path, &message)
@@ -1339,9 +1486,13 @@ fn verify_quote(state: &TpmState, request: &AttestationAllResponse) -> Result<bo
             "Attestation Key public part cannot be written: {err}"
         ))
     })?;
+    #[cfg(debug_assertions)]
+    _g_write.end();
 
     // `tpm2_checkquote` is an offline verifier: it does not talk to a TPM and
     // rejects the `--tcti` option, so it is invoked without one.
+    #[cfg(debug_assertions)]
+    let _g_check = crate::metrics::unit("tpm2_checkquote_us");
     let binary = "tpm2_checkquote";
     let output = match Command::new(binary)
         .args([
@@ -1434,6 +1585,10 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
+        // Runs before the handler returns, so it belongs to the request's
+        // end-to-end time.
+        #[cfg(debug_assertions)]
+        let _g_scratch = crate::metrics::span("scratch_drop_us");
         let _ = fs::remove_dir_all(&self.dir);
     }
 }

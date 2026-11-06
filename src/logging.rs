@@ -295,6 +295,9 @@ impl Fairing for RequestLogger {
 
     async fn on_request(&self, req: &mut Request<'_>, _data: &mut Data<'_>) {
         req.local_cache(Instant::now);
+        // Debug builds measure every request; release builds compile this away.
+        #[cfg(debug_assertions)]
+        crate::metrics::begin_request(req);
         log_request(
             req.method().as_str(),
             req.uri().to_string().as_str(),
@@ -308,6 +311,12 @@ impl Fairing for RequestLogger {
         let method = req.method().as_str();
         let uri = req.uri().to_string();
         let status = res.status();
+
+        // Finalize the timing record (debug only): this is the only place that
+        // knows both the final status and the arrival instant, so it is where
+        // `e2e_server_us`, `http_status` and the residual are computed.
+        #[cfg(debug_assertions)]
+        crate::metrics::record_response(req, status.code);
 
         log_response(method, &uri, status, latency);
     }

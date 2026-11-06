@@ -28,6 +28,7 @@ use rocket::{get, post, State};
 
 use crate::attestation::{generate_tdx_report, verify_tdx_report, AttestationError};
 use crate::gpu::{self, GpuAttestationResponse, GpuError};
+use crate::metrics::Timing;
 use crate::report::{parse_tdreport, ParseReportRequest, ParseReportResponse};
 use crate::tpm::{
     self, AttestationAllResponse, InformationTpmResponse, QuoteTpmRequest, QuoteTpmResponse,
@@ -196,20 +197,31 @@ pub fn ping() -> &'static str {
 ///   exists, `501 Not Implemented` until then.
 #[get("/attestation-with-randomnumber?<rn>")]
 pub fn attestation_with_random_number(
+    _timing: Timing,
     rn: Option<String>,
 ) -> Result<Json<AttestationResponse>, ApiError> {
+    #[cfg(debug_assertions)]
+    crate::metrics::enter_handler();
+
     let rn = rn.ok_or_else(|| ApiError::bad_request("missing query parameter 'rn'"))?;
 
     // `rn` is only required to be a valid hex string. No fixed byte length is
     // enforced here: the byte-length/zero-padding rules belong to the future
     // REPORTDATA binding inside `generate_tdx_report`.
+    #[cfg(debug_assertions)]
+    let _g_hex = crate::metrics::span("nonce_validate_us");
     let random_number = hex::decode(&rn)
         .map_err(|err| ApiError::bad_request(format!("'rn' is not a valid hex string: {err}")))?;
+    #[cfg(debug_assertions)]
+    _g_hex.end();
 
     let report = generate_tdx_report(&random_number)?;
-    Ok(Json(AttestationResponse {
+    let response = AttestationResponse {
         report: hex::encode(report),
-    }))
+    };
+    #[cfg(debug_assertions)]
+    crate::metrics::measure_json(&response);
+    Ok(Json(response))
 }
 
 /// `POST /verify-report`
@@ -225,19 +237,34 @@ pub fn attestation_with_random_number(
 ///   verifier exists, `501 Not Implemented` until then.
 #[post("/verify-report", data = "<body>")]
 pub fn verify_report(
+    _timing: Timing,
     body: Result<String, std::io::Error>,
 ) -> Result<Json<VerifyReportResponse>, ApiError> {
+    #[cfg(debug_assertions)]
+    crate::metrics::enter_handler();
+
     let body = body.map_err(|err| ApiError::bad_request(format!("could not read body: {err}")))?;
 
+    #[cfg(debug_assertions)]
+    let _g_deser = crate::metrics::span("json_deserialize_us");
     let request: VerifyReportRequest = serde_json::from_str(&body)
         .map_err(|err| ApiError::bad_request(format!("invalid JSON body: {err}")))?;
+    #[cfg(debug_assertions)]
+    _g_deser.end();
 
+    #[cfg(debug_assertions)]
+    let _g_hex = crate::metrics::span("report_decode_us");
     let report = hex::decode(&request.report).map_err(|err| {
         ApiError::bad_request(format!("'report' is not a valid hex string: {err}"))
     })?;
+    #[cfg(debug_assertions)]
+    _g_hex.end();
 
     let trusted = verify_tdx_report(&report)?;
-    Ok(Json(VerifyReportResponse { trusted }))
+    let response = VerifyReportResponse { trusted };
+    #[cfg(debug_assertions)]
+    crate::metrics::measure_json(&response);
+    Ok(Json(response))
 }
 
 /// `POST /parse-report`
@@ -254,18 +281,32 @@ pub fn verify_report(
 /// * well-formed request        -> `200 { ...decoded fields... }`
 #[post("/parse-report", data = "<body>")]
 pub fn parse_report(
+    _timing: Timing,
     body: Result<String, std::io::Error>,
 ) -> Result<Json<ParseReportResponse>, ApiError> {
+    #[cfg(debug_assertions)]
+    crate::metrics::enter_handler();
+
     let body = body.map_err(|err| ApiError::bad_request(format!("could not read body: {err}")))?;
 
+    #[cfg(debug_assertions)]
+    let _g_deser = crate::metrics::span("json_deserialize_us");
     let request: ParseReportRequest = serde_json::from_str(&body)
         .map_err(|err| ApiError::bad_request(format!("invalid JSON body: {err}")))?;
+    #[cfg(debug_assertions)]
+    _g_deser.end();
 
+    #[cfg(debug_assertions)]
+    let _g_hex = crate::metrics::span("report_decode_us");
     let report = hex::decode(&request.report).map_err(|err| {
         ApiError::bad_request(format!("'report' is not a valid hex string: {err}"))
     })?;
+    #[cfg(debug_assertions)]
+    _g_hex.end();
 
     let parsed = parse_tdreport(&report)?;
+    #[cfg(debug_assertions)]
+    crate::metrics::measure_json(&parsed);
     Ok(Json(parsed))
 }
 
@@ -291,9 +332,15 @@ pub fn parse_report(
 /// * script exits non-zero           -> `500 Internal Server Error`
 /// * otherwise                       -> `200 { "gpu-attestation": { ... } }`
 #[get("/gpu-attestation")]
-pub fn gpu_attestation() -> Result<Json<GpuAttestationResponse>, ApiError> {
+pub fn gpu_attestation(_timing: Timing) -> Result<Json<GpuAttestationResponse>, ApiError> {
+    #[cfg(debug_assertions)]
+    crate::metrics::enter_handler();
+
     let gpu_attestation = gpu::gpu_attestation()?;
-    Ok(Json(GpuAttestationResponse { gpu_attestation }))
+    let response = GpuAttestationResponse { gpu_attestation };
+    #[cfg(debug_assertions)]
+    crate::metrics::measure_json(&response);
+    Ok(Json(response))
 }
 
 // ---------------------------------------------------------------------------
@@ -314,8 +361,16 @@ pub fn gpu_attestation() -> Result<Json<GpuAttestationResponse>, ApiError> {
 /// Nothing is fabricated: both the PCR value and every digest come from the TPM
 /// and from the filesystem respectively.
 #[get("/information_tpm")]
-pub fn information_tpm(state: &State<TpmState>) -> Result<Json<InformationTpmResponse>, ApiError> {
+pub fn information_tpm(
+    _timing: Timing,
+    state: &State<TpmState>,
+) -> Result<Json<InformationTpmResponse>, ApiError> {
+    #[cfg(debug_assertions)]
+    crate::metrics::enter_handler();
+
     let response = tpm::information_tpm(state.inner())?;
+    #[cfg(debug_assertions)]
+    crate::metrics::measure_json(&response);
     Ok(Json(response))
 }
 
@@ -341,16 +396,31 @@ pub fn information_tpm(state: &State<TpmState>) -> Result<Json<InformationTpmRes
 /// * otherwise                         -> `200 { ... }`
 #[post("/quote_tpm", data = "<body>")]
 pub fn quote_tpm(
+    _timing: Timing,
     state: &State<TpmState>,
     body: Result<String, std::io::Error>,
 ) -> Result<Json<QuoteTpmResponse>, ApiError> {
+    #[cfg(debug_assertions)]
+    crate::metrics::enter_handler();
+
     let body = body.map_err(|err| ApiError::bad_request(format!("could not read body: {err}")))?;
 
+    #[cfg(debug_assertions)]
+    let _g_deser = crate::metrics::span("json_deserialize_us");
     let request: QuoteTpmRequest = serde_json::from_str(&body)
         .map_err(|err| ApiError::bad_request(format!("invalid JSON body: {err}")))?;
+    #[cfg(debug_assertions)]
+    _g_deser.end();
 
+    #[cfg(debug_assertions)]
+    let _g_nonce = crate::metrics::span("nonce_validate_us");
     let nonce = request.resolved_nonce()?;
+    #[cfg(debug_assertions)]
+    _g_nonce.end();
+
     let response = tpm::quote_tpm(state.inner(), &nonce)?;
+    #[cfg(debug_assertions)]
+    crate::metrics::measure_json(&response);
     Ok(Json(response))
 }
 
@@ -376,16 +446,31 @@ pub fn quote_tpm(
 /// * otherwise                         -> `200 { ... }`
 #[post("/attestation_all", data = "<body>")]
 pub fn attestation_all(
+    _timing: Timing,
     state: &State<TpmState>,
     body: Result<String, std::io::Error>,
 ) -> Result<Json<AttestationAllResponse>, ApiError> {
+    #[cfg(debug_assertions)]
+    crate::metrics::enter_handler();
+
     let body = body.map_err(|err| ApiError::bad_request(format!("could not read body: {err}")))?;
 
+    #[cfg(debug_assertions)]
+    let _g_deser = crate::metrics::span("json_deserialize_us");
     let request: QuoteTpmRequest = serde_json::from_str(&body)
         .map_err(|err| ApiError::bad_request(format!("invalid JSON body: {err}")))?;
+    #[cfg(debug_assertions)]
+    _g_deser.end();
 
+    #[cfg(debug_assertions)]
+    let _g_nonce = crate::metrics::span("nonce_validate_us");
     let nonce = request.resolved_nonce()?;
+    #[cfg(debug_assertions)]
+    _g_nonce.end();
+
     let response = tpm::attestation_all(state.inner(), &nonce)?;
+    #[cfg(debug_assertions)]
+    crate::metrics::measure_json(&response);
     Ok(Json(response))
 }
 
@@ -402,15 +487,25 @@ pub fn attestation_all(
 /// * otherwise                         -> `200 { "trusted": bool, ... }`
 #[post("/verify_all", data = "<body>")]
 pub fn verify_all(
+    _timing: Timing,
     state: &State<TpmState>,
     body: Result<String, std::io::Error>,
 ) -> Result<Json<VerifyAllResponse>, ApiError> {
+    #[cfg(debug_assertions)]
+    crate::metrics::enter_handler();
+
     let body = body.map_err(|err| ApiError::bad_request(format!("could not read body: {err}")))?;
 
+    #[cfg(debug_assertions)]
+    let _g_deser = crate::metrics::span("json_deserialize_us");
     let request: AttestationAllResponse = serde_json::from_str(&body)
         .map_err(|err| ApiError::bad_request(format!("invalid JSON body: {err}")))?;
+    #[cfg(debug_assertions)]
+    _g_deser.end();
 
     let response = tpm::verify_all(state.inner(), &request)?;
+    #[cfg(debug_assertions)]
+    crate::metrics::measure_json(&response);
     Ok(Json(response))
 }
 

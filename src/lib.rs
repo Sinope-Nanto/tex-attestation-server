@@ -20,6 +20,7 @@ pub mod api;
 pub mod attestation;
 pub mod gpu;
 pub mod logging;
+pub mod metrics;
 pub mod report;
 pub mod tpm;
 

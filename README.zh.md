@@ -366,6 +366,33 @@ curl -sS -X POST -H 'Content-Type: application/json' \
 日志绝不能成为请求失败的原因。实现位于 [`src/logging.rs`](src/logging.rs)，
 由 [`tests/test_logging.rs`](tests/test_logging.rs) 覆盖。
 
+### 耗时记录（仅 debug 构建）
+
+**debug** 构建下每个请求还会在 `log/json/` 写一份 JSON，记录这次请求的时间花在哪里：
+端到端服务端耗时、互斥的 `stages`、更细的 `units`（每次 `tpm2-*` 调用、目录遍历、
+TDX ioctl 各一条），以及计数器 `files_measured` / `bytes_measured`：
+
+```json
+{
+  "ts": "2026-11-06T07:04:51Z",
+  "route": "/attestation_all",
+  "http_status": 200,
+  "warm": true,
+  "concurrency": 1,
+  "e2e_server_us": 128400,
+  "e2e_client_us": null,
+  "stages": { "lock_wait_us": 12, "create_quote_us": 62400, "...": 0 },
+  "units": { "tpm2_quote_us": 25600, "files_measured": 6, "...": 0 },
+  "unattributed_us": -1288,
+  "checksum_ok": true
+}
+```
+
+release 构建会把这一整套编译掉：不计时、不分配、不写文件。逐字段含义、每个值怎么测、
+以及哪些字段在 handler 内部根本观测不到，见
+[`docs/attestation-sample-record-fields.md`](docs/attestation-sample-record-fields.md)；
+输出目录可用 `TDX_TIMING_DIR` 重定向（默认 `<项目>/log/json`）。
+
 ## 测试
 
 ```console

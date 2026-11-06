@@ -29,3 +29,6 @@ primary.ctx
 # Runtime audit log written by the service (see src/logging.rs). The directory
 # is tracked so the default location exists; its contents are not.
 log/*.log
+
+# Per-request latency records written by debug builds (see src/metrics.rs).
+log/json/
