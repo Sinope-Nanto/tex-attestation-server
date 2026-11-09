@@ -393,6 +393,17 @@ release 构建会把这一整套编译掉：不计时、不分配、不写文件
 [`docs/attestation-sample-record-fields.md`](docs/attestation-sample-record-fields.md)；
 输出目录可用 `TDX_TIMING_DIR` 重定向（默认 `<项目>/log/json`）。
 
+两个配套工具直接作用于这些记录：
+
+```console
+make bench BENCH_COUNT=100     # 连续 N 次请求，每次新 nonce（客户端侧 p50/p90/p99）
+make timing-csv                # log/json/*.json -> log/json/summary.csv
+```
+
+`tools/summarize_timing.py` 会为每个 route 的每个指标输出一行 CSV，列为
+`n / mean / std / cv / min / p50 / p90 / p99 / max / share_pct`，
+阶段耗时占比可以直接在表格里看。
+
 ## 测试
 
 ```console

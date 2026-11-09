@@ -356,6 +356,17 @@ observed from inside a handler are documented in
 [`docs/attestation-sample-record-fields.md`](docs/attestation-sample-record-fields.md);
 `TDX_TIMING_DIR` redirects the output directory (`<project>/log/json` by default).
 
+Two helpers operate on these records:
+
+```console
+make bench BENCH_COUNT=100     # N requests, fresh nonce each time (client-side p50/p90/p99)
+make timing-csv                # log/json/*.json -> log/json/summary.csv
+```
+
+`tools/summarize_timing.py` emits one CSV row per metric per route with
+`n / mean / std / cv / min / p50 / p90 / p99 / max / share_pct`, so the stage
+breakdown can be read directly in a spreadsheet.
+
 ## Test
 
 ```console

@@ -459,6 +459,25 @@ handler 收到的只是 `Result<String, io::Error>`。所以 `src/api.rs:382` �
 | 每个 handler 的入口与阶段 | `src/api.rs`（`_timing: Timing` 参数 + `enter_handler()`） |
 | 后端阶段与单元 | `src/tpm.rs`、`src/attestation.rs`（`span` / `unit` / `count` / `mark_cold`） |
 
+### 9.2.1 采集与汇总工具
+
+| 工具 | 作用 |
+|------|------|
+| `tests/bench_attestation_all.sh` | 连续 N 次 `POST /attestation_all`（每次新 nonce），输出客户端耗时 p50/p90/p99 与服务端记录增量；`CURL_TIMEOUT` / `CONNECT_TIMEOUT` 可调，大模型目录建议 `CURL_TIMEOUT=0 sh ... 100` |
+| `tools/summarize_timing.py` | 把 `log/json/*.json` 聚合成一个长表 CSV：每个 route 的每个指标一行，含 `n / mean / std / cv / min / p50 / p90 / p99 / max / share_pct` |
+
+```console
+make bench BENCH_COUNT=100        # 采集
+make timing-csv                   # 汇总 -> log/json/summary.csv
+
+# 等价于
+python3 tools/summarize_timing.py log/json -o log/json/summary.csv
+```
+
+CSV 的 `kind` 列区分 `e2e` / `stage` / `unit` / `counter` / `derived`，`unit=count` 说明该行是计数
+（`files_measured` 之类）而不是耗时，`share_pct` 为占 e2e 均值的百分比。默认只统计
+`http_status=200` 且 `checksum_ok=true` 的记录，被排除的条数会打印出来。
+
 ### 9.3 字段实现口径（与 §4.3 的约定一致）
 
 | 字段 | 实现口径 |

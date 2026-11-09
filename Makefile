@@ -6,6 +6,8 @@
 #   make test-hw    # TDX hardware test (/dev/tdx_guest + /dev/tdx_verify)
 #   make test-unit  # cargo unit/integration tests
 #   make test-web   # end-to-end curl test of the running service
+#   make bench      # N consecutive POST /attestation_all requests
+#   make timing-csv # aggregate log/json/*.json into log/json/summary.csv
 #   make clean
 
 CARGO ?= cargo
@@ -13,8 +15,10 @@ CC    ?= cc
 
 WEB_BASE_URL ?= http://127.0.0.1:8000
 BENCH_COUNT  ?= 100
+TIMING_DIR   ?= log/json
+TIMING_CSV   ?= log/json/summary.csv
 
-.PHONY: run all build test test-hw test-unit test-web test-tpm test-tpm-web test-gpu-web bench kmod kmod-load clean
+.PHONY: run all build test test-hw test-unit test-web test-tpm test-tpm-web test-gpu-web bench timing-csv kmod kmod-load clean
 
 run:
 	TPM_MEASURE_DIR=/root/vonsky/models/DeepSeek-R1-Distill-Qwen-7B/ cargo run
@@ -53,6 +57,10 @@ test-gpu-web:
 # Latency benchmark: N consecutive POST /attestation_all requests (BENCH_COUNT).
 bench:
 	WEB_BASE_URL=$(WEB_BASE_URL) bash tests/bench_attestation_all.sh $(BENCH_COUNT)
+
+# Aggregate the per-request latency records (log/json/*.json) into a CSV.
+timing-csv:
+	python3 tools/summarize_timing.py $(TIMING_DIR) -o $(TIMING_CSV)
 
 test: test-hw test-unit test-web test-tpm test-tpm-web test-gpu-web
 
