@@ -425,7 +425,6 @@ mod imp {
 
     fn render(rec: &Recorder, status: u16, e2e_us: u64, ts: &str) -> String {
         let unattributed = e2e_us as i64 - rec.stages.total() as i64;
-        let sum_units = rec.units.total();
 
         let mut s = String::with_capacity(1024);
         s.push_str("{\n");
@@ -443,13 +442,13 @@ mod imp {
         s.push_str(&format!("  \"unattributed_us\": {},\n", unattributed));
         s.push_str(&format!(
             "  \"checksum_ok\": {}\n",
-            checksum_ok(rec, e2e_us, unattributed, sum_units)
+            checksum_ok(rec, e2e_us, unattributed)
         ));
         s.push_str("}\n");
         s
     }
 
-    fn checksum_ok(rec: &Recorder, e2e_us: u64, unattributed: i64, sum_units: u64) -> bool {
+    fn checksum_ok(rec: &Recorder, e2e_us: u64, unattributed: i64) -> bool {
         // (1) The residual must be small; the framework always leaves a little.
         let tolerance = std::cmp::max(1_000, e2e_us / 20);
         let mut ok = unattributed.unsigned_abs() <= tolerance;
@@ -472,7 +471,13 @@ mod imp {
             ok &= parent + tolerance >= child;
         }
 
-        // (3) The TPM CLI work cannot exceed the whole request.
+        // (3) Units are *not* mutually exclusive: `measure_folder_us` already
+        //     contains `collect_regular_files_us` and `read_and_hash_loop_us`,
+        //     so summing every unit double counts the folder walk. Only the
+        //     outer, disjoint units may be compared with the whole request -
+        //     otherwise a directory-measurement-dominated request (a large model,
+        //     where the folder costs ~2x what the sum of its own parts plus the
+        //     TPM work costs) is misreported as inconsistent.
         let tpm_us: u64 = rec
             .units
             .items
@@ -480,8 +485,8 @@ mod imp {
             .filter(|(n, _)| n.starts_with("tpm2_"))
             .map(|(_, v)| *v)
             .sum();
-        ok &= tpm_us <= e2e_us.saturating_add(tolerance)
-            && sum_units <= e2e_us.saturating_add(tolerance);
+        let folder_us = rec.units.get("measure_folder_us").unwrap_or(0);
+        ok &= tpm_us.saturating_add(folder_us) <= e2e_us.saturating_add(tolerance);
 
         ok
     }
@@ -700,12 +705,49 @@ mod imp {
         }
 
         #[test]
+        fn checksum_accepts_a_large_measured_directory() {
+            // 7B 模型目录：目录度量 ~90 s 是绝对大头，TPM 部分只有 ~130 ms。
+            // `measure_folder_us` 已经包含 `collect_regular_files_us` 和
+            // `read_and_hash_loop_us`，三者的和接近两倍的实际耗时 —— 早期版本
+            // 用"所有 units 之和 <= e2e" 判断，会把这类记录全部误判为不自洽。
+            let mut rec = Recorder::new();
+            rec.stages.add("http_body_read_us", 900);
+            rec.stages.add("measure_and_extend_us", 90_050_000);
+            rec.stages.add("ensure_ak_us", 18_200);
+            rec.stages.add("create_quote_us", 62_000);
+            rec.stages.add("tdx_report_us", 5_300);
+            rec.units.add("measure_folder_us", 89_900_000);
+            rec.units.add("collect_regular_files_us", 120_000);
+            rec.units.add("read_and_hash_loop_us", 89_760_000);
+            rec.units.add("tpm2_startup_us", 18_100);
+            rec.units.add("tpm2_quote_us", 25_600);
+            rec.units.add("ioctl_get_report_us", 5_200);
+            rec.counters.add("files_measured", 20);
+
+            let e2e = 90_150_000u64;
+            let unattributed = e2e as i64 - rec.stages.total() as i64;
+            assert_eq!(unattributed, 13_600);
+            assert!(checksum_ok(&rec, e2e, unattributed));
+        }
+
+        #[test]
         fn checksum_rejects_units_bigger_than_the_request() {
             let mut rec = Recorder::new();
             rec.units.add("tpm2_quote_us", 900_000);
             let e2e = 1_000u64;
             let unattributed = e2e as i64;
-            assert!(!checksum_ok(&rec, e2e, unattributed, rec.units.total()));
+            assert!(!checksum_ok(&rec, e2e, unattributed));
+        }
+
+        #[test]
+        fn checksum_rejects_a_folder_that_beats_the_request() {
+            let mut rec = Recorder::new();
+            // 目录度量本身不可能比整个请求还长。
+            rec.stages.add("measure_and_extend_us", 1_000);
+            rec.units.add("measure_folder_us", 90_000);
+            let e2e = 2_000u64;
+            let unattributed = e2e as i64 - rec.stages.total() as i64;
+            assert!(!checksum_ok(&rec, e2e, unattributed));
         }
 
         #[test]
@@ -724,7 +766,7 @@ mod imp {
             let e2e = 128_400u64;
             let unattributed = e2e as i64 - rec.stages.total() as i64;
             assert_eq!(unattributed, 1_190);
-            assert!(checksum_ok(&rec, e2e, unattributed, rec.units.total()));
+            assert!(checksum_ok(&rec, e2e, unattributed));
         }
 
         #[test]
@@ -738,7 +780,7 @@ mod imp {
             let e2e = 20_000u64;
             let unattributed = e2e as i64 - rec.stages.total() as i64;
             assert_eq!(unattributed, 0);
-            assert!(!checksum_ok(&rec, e2e, unattributed, rec.units.total()));
+            assert!(!checksum_ok(&rec, e2e, unattributed));
         }
 
         #[test]

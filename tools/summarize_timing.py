@@ -32,7 +32,8 @@
     python3 tools/summarize_timing.py log/json --raw raw.csv   # 额外导出逐请求宽表
 
 默认只统计 http_status=200 且 checksum_ok=true 的记录；被排除的条数会打印出来，
-想全都算上就加 --keep-failed / --keep-inconsistent。
+想全都算上就加 --keep-failed / --keep-inconsistent。没有一条通过过滤时不生成 CSV
+（避免用空表覆盖上一次的好结果），退出码为 1。
 """
 
 from __future__ import annotations
@@ -421,7 +422,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
 
     rows = build_rows(groups, group_fields)
-    write_stats(output, group_fields, rows)
 
     raw_rows = None
     if args.raw:
@@ -442,6 +442,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"  排除   : 早于 --since      -> {skipped['before_since']} 条")
         if skipped["no_e2e"]:
             print(f"  排除   : 缺 e2e_server_us  -> {skipped['no_e2e']} 条")
+        if total == 0 and skipped["inconsistent"]:
+            print("\n  提示: 一条都没留下，全部被 checksum_ok 排除。先看一条原始记录:")
+            print(f"        python3 -m json.tool $(ls {root}/*.json | head -1) | head -40")
+            print("        若 stages 之和 <= e2e_server_us、units 也都是数字，说明记录本身没问题，")
+            print("        只是校验规则太严；先加 --keep-inconsistent 出统计:")
+            print(f"        python3 tools/summarize_timing.py {root} --keep-inconsistent -o {output}")
 
         for key, group in sorted(groups.items()):
             e2e = describe(group.e2e)
@@ -479,12 +485,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         f"(docs/attestation-sample-record-fields.md 第 5 节)"
                     )
 
-        print(f"\nCSV      : {output} ({len(rows)} 行)")
         if raw_rows is not None:
             print(f"逐请求表 : {args.raw} ({raw_rows} 行)")
 
-    return 0
+    if not rows:
+        # 没有可统计的记录时不写文件：免得用一份空表覆盖掉上次的好结果。
+        print(
+            f"error: {len(files)} 个文件里没有一条通过过滤，未生成 CSV",
+            file=sys.stderr,
+        )
+        return 1
 
+    write_stats(output, group_fields, rows)
+
+    if not args.quiet:
+        print(f"\nCSV      : {output} ({len(rows)} 行)")
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())

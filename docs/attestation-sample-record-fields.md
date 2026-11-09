@@ -489,7 +489,13 @@ CSV 的 `kind` 列区分 `e2e` / `stage` / `unit` / `counter` / `derived`，`uni
 | `warm` | 本次请求没有建 AK（`ensure_ak` 未进入创建分支）且 AK 公钥**缓存命中** 时为 `true` |
 | `concurrency` | 服务端在途请求数（到达时刻），不是压测工具配置的并发度；单请求压测时两者一致 |
 | `unattributed_us` | `e2e_server_us − Σ(stages)`，由代码计算，绝不手工填写 |
-| `checksum_ok` | ①残差 ≤ `max(1000, 5%·e2e)`；②`measure_folder_us ≥ collect + read_hash`；③`tdx_report_us ≥ ioctl_get_report_us`；④`Σ(tpm2_*) ≤ e2e`。任一不满足即 `false` |
+| `checksum_ok` | ①残差 ≤ `max(1000, 5%·e2e)`；②`measure_folder_us ≥ collect + read_hash`；③`tdx_report_us ≥ ioctl_get_report_us`；④`measure_folder_us + Σ(tpm2_*) ≤ e2e`。任一不满足即 `false` |
+
+> **④ 为什么不是"所有 units 之和"**：`units` 之间有**包含关系**（`measure_folder_us` 已经包含
+> `collect_regular_files_us` 和 `read_and_hash_loop_us`），全量相加会把目录遍历算两遍。
+> 早期版本用了全量相加，结果在"目录度量占绝对大头"的场景（大模型目录）里，
+> `Σunits ≈ 2 × measure_folder` 必然超过 e2e，导致**每一条记录都被判为不自洽**。
+> 现在只累加互不重叠的外层单元（`measure_folder_us` + 所有 `tpm2_*`）。
 
 ### 9.4 与本文档的已知差异（以代码为准）
 
