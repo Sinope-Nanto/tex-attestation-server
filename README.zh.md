@@ -397,6 +397,7 @@ release 构建会把这一整套编译掉：不计时、不分配、不写文件
 
 ```console
 make bench BENCH_COUNT=100     # 连续 N 次请求，每次新 nonce（客户端侧 p50/p90/p99）
+make bench-verify              # 取一份证明后重放 N 次 /verify_all
 make timing-csv                # log/json/*.json -> log/json/summary.csv
 ```
 

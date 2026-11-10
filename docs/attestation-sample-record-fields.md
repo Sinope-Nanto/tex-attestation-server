@@ -464,15 +464,22 @@ handler 收到的只是 `Result<String, io::Error>`。所以 `src/api.rs:382` �
 | 工具 | 作用 |
 |------|------|
 | `tests/bench_attestation_all.sh` | 连续 N 次 `POST /attestation_all`（每次新 nonce），输出客户端耗时 p50/p90/p99 与服务端记录增量；`CURL_TIMEOUT` / `CONNECT_TIMEOUT` 可调，大模型目录建议 `CURL_TIMEOUT=0 sh ... 100` |
+| `tests/bench_verify_all.sh` | 取**一份**证明后重放 N 次 `POST /verify_all`，量纯验证开销（验证无状态，重放合法）；`PROOF=` 复用已存证明，`PROOF_OUT=` 把取到的证明存下来，`ROUTE=verify-report` 只测 TDX 模块那一次 ioctl |
 | `tools/summarize_timing.py` | 把 `log/json/*.json` 聚合成一个长表 CSV：每个 route 的每个指标一行，含 `n / mean / std / cv / min / p50 / p90 / p99 / max / share_pct` |
 
 ```console
-make bench BENCH_COUNT=100        # 采集
-make timing-csv                   # 汇总 -> log/json/summary.csv
+make bench BENCH_COUNT=100                  # 采集生成侧
+make bench-verify BENCH_COUNT=100           # 采集验证侧（自动取一份证明）
+make bench-verify PROOF=out/resp-1.json     # 复用已有证明
+make timing-csv                             # 汇总 -> log/json/summary.csv
 
 # 等价于
 python3 tools/summarize_timing.py log/json -o log/json/summary.csv
 ```
+
+验证侧与生成侧的记录落在同一个目录，`summarize_timing.py` 按 `route` 自动分成两块，
+所以"`/attestation_all` 的 e2e 均值 vs `/verify_all` 的 e2e 均值"就是一次证明的
+生成/验证耗时对比。
 
 CSV 的 `kind` 列区分 `e2e` / `stage` / `unit` / `counter` / `derived`，`unit=count` 说明该行是计数
 （`files_measured` 之类）而不是耗时，`share_pct` 为占 e2e 均值的百分比。默认只统计
