@@ -173,6 +173,12 @@ pub fn gpu_attest_script_path() -> PathBuf {
 /// * script exits non-zero           -> [`GpuError::Internal`] (`500`)
 /// * otherwise                       -> the parsed [`GpuAttestation`]
 pub fn gpu_attestation() -> Result<GpuAttestation, GpuError> {
+    // Debug builds time this like any other backend call: the whole GPU stage is
+    // "run the pre-built SDK and read its text", which is what `gpu_script_us`
+    // measures. Release builds compile the span away.
+    #[cfg(debug_assertions)]
+    let _g_gpu = crate::metrics::span("gpu_attest_us");
+
     let script = gpu_attest_script_path();
     let text = run_script(&script)?;
     Ok(parse_gpu_attestation(&text))
@@ -180,6 +186,13 @@ pub fn gpu_attestation() -> Result<GpuAttestation, GpuError> {
 
 /// Runs `script` and returns its combined stdout + stderr.
 fn run_script(script: &Path) -> Result<String, GpuError> {
+    // This is the step that actually obtains the GPU report: `fork/exec` of
+    // `sh gpu_local_attest.sh`, which runs the pre-built `nvattest` binary. Its
+    // internal phases (cert-chain fetch, OCSP, RIM comparison) are invisible
+    // from here - the only boundary the service can see is the process exit.
+    #[cfg(debug_assertions)]
+    let _g_script = crate::metrics::unit("gpu_script_us");
+
     if !script.is_file() {
         return Err(GpuError::NotImplemented(format!(
             "the GPU attestation script `{}` was not found",
@@ -252,6 +265,9 @@ fn run_script(script: &Path) -> Result<String, GpuError> {
 /// understand is ignored rather than turned into an error, so a future SDK that
 /// adds a field keeps working.
 pub fn parse_gpu_attestation(text: &str) -> GpuAttestation {
+    #[cfg(debug_assertions)]
+    let _g_parse = crate::metrics::unit("gpu_parse_us");
+
     let mut result = GpuAttestation::default();
     let mut current: Option<GpuDevice> = None;
     // Name of the certificate chain the following `Status:`/`OCSP:`/`Expires:`

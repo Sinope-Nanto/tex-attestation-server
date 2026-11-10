@@ -470,6 +470,13 @@ mod imp {
         ) {
             ok &= parent + tolerance >= child;
         }
+        // `/gpu-attestation`: nearly all of it is the SDK subprocess.
+        if let (Some(parent), Some(child)) = (
+            rec.stages.get("gpu_attest_us"),
+            rec.units.get("gpu_script_us"),
+        ) {
+            ok &= parent + tolerance >= child;
+        }
 
         // (3) Units are *not* mutually exclusive: `measure_folder_us` already
         //     contains `collect_regular_files_us` and `read_and_hash_loop_us`,
@@ -767,6 +774,32 @@ mod imp {
             let unattributed = e2e as i64 - rec.stages.total() as i64;
             assert_eq!(unattributed, 1_190);
             assert!(checksum_ok(&rec, e2e, unattributed));
+        }
+
+        #[test]
+        fn checksum_accepts_a_gpu_attestation_record() {
+            // `/gpu-attestation`: 几乎全部时间都在 nvattest 那个子进程里,
+            // 服务端只看得到"进程退出"这一个边界。
+            let mut rec = Recorder::new();
+            rec.stages.add("http_body_read_us", 40);
+            rec.stages.add("gpu_attest_us", 1_830_000);
+            rec.stages.add("serialize_us", 12);
+            rec.units.add("gpu_script_us", 1_829_000);
+            rec.units.add("gpu_parse_us", 700);
+
+            let e2e = 1_831_000u64;
+            let unattributed = e2e as i64 - rec.stages.total() as i64;
+            assert_eq!(unattributed, 948);
+            assert!(checksum_ok(&rec, e2e, unattributed));
+        }
+
+        #[test]
+        fn checksum_rejects_a_request_with_nothing_measured() {
+            // 只记了请求边界、没给后端埋点时，残差就是全部耗时 —— 校验会把它暴露出来，
+            // 这正是 `/gpu-attestation` 在补埋点之前会被判 false 的原因。
+            let rec = Recorder::new();
+            let e2e = 1_830_000u64;
+            assert!(!checksum_ok(&rec, e2e, e2e as i64));
         }
 
         #[test]

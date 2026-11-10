@@ -8,6 +8,7 @@
 #   make test-web   # end-to-end curl test of the running service
 #   make bench      # N consecutive POST /attestation_all requests
 #   make bench-verify # replay one proof N times against POST /verify_all
+#   make bench-gpu  # N GET /gpu-attestation (each spawns nvattest)
 #   make timing-csv # aggregate log/json/*.json into log/json/summary.csv
 #   make clean
 
@@ -17,10 +18,11 @@ CC    ?= cc
 WEB_BASE_URL ?= http://127.0.0.1:8000
 BENCH_COUNT  ?= 100
 BENCH_PROOF  ?=
+GPU_BENCH_COUNT ?= 20
 TIMING_DIR   ?= log/json
 TIMING_CSV   ?= log/json/summary.csv
 
-.PHONY: run all build test test-hw test-unit test-web test-tpm test-tpm-web test-gpu-web bench bench-verify timing-csv kmod kmod-load clean
+.PHONY: run all build test test-hw test-unit test-web test-tpm test-tpm-web test-gpu-web bench bench-verify bench-gpu timing-csv kmod kmod-load clean
 
 run:
 	TPM_MEASURE_DIR=/root/vonsky/models/DeepSeek-R1-Distill-Qwen-7B/ cargo run
@@ -63,6 +65,10 @@ bench:
 # Verify-side benchmark: replay one proof N times (BENCH_PROOF=file reuses a saved one).
 bench-verify:
 	WEB_BASE_URL=$(WEB_BASE_URL) PROOF='$(BENCH_PROOF)' bash tests/bench_verify_all.sh $(BENCH_COUNT)
+
+# GPU-side benchmark: each request really runs nvattest (GPU_BENCH_COUNT).
+bench-gpu:
+	WEB_BASE_URL=$(WEB_BASE_URL) bash tests/bench_gpu_attest.sh $(GPU_BENCH_COUNT)
 
 # Aggregate the per-request latency records (log/json/*.json) into a CSV.
 timing-csv:

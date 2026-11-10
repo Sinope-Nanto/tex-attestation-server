@@ -465,6 +465,7 @@ handler 收到的只是 `Result<String, io::Error>`。所以 `src/api.rs:382` �
 |------|------|
 | `tests/bench_attestation_all.sh` | 连续 N 次 `POST /attestation_all`（每次新 nonce），输出客户端耗时 p50/p90/p99 与服务端记录增量；`CURL_TIMEOUT` / `CONNECT_TIMEOUT` 可调，大模型目录建议 `CURL_TIMEOUT=0 sh ... 100` |
 | `tests/bench_verify_all.sh` | 取**一份**证明后重放 N 次 `POST /verify_all`，量纯验证开销（验证无状态，重放合法）；`PROOF=` 复用已存证明，`PROOF_OUT=` 把取到的证明存下来，`ROUTE=verify-report` 只测 TDX 模块那一次 ioctl |
+| `tests/bench_gpu_attest.sh` | 连续 N 次 `GET /gpu-attestation`，**每请求真跑一次 `nvattest`**（含 OCSP 联网）；分别统计 HTTP 成功与证明结论，服务端 `gpu_script_us` 就是"拿报告"那一步 |
 | `tools/summarize_timing.py` | 把 `log/json/*.json` 聚合成一个长表 CSV：每个 route 的每个指标一行，含 `n / mean / std / cv / min / p50 / p90 / p99 / max / share_pct` |
 
 ```console
@@ -509,9 +510,9 @@ CSV 的 `kind` 列区分 `e2e` / `stage` / `unit` / `counter` / `derived`，`uni
 1. `files_measured` / `bytes_measured` 仍放在 `units` 内（按本文档 §1 的形状），但**不参与任何求和**；
    §6.5 建议的独立 `counters` 组尚未采用。
 2. 计数器与时长共用一个 `units` 对象，读数据时必须按"有无 `_us` 后缀"区分（校验器已如此处理）。
-3. `/verify-report`、`/parse-report`、`/quote_tpm`、`/information_tpm`、`/verify_all` 各有自己的
-   stage 子集（如 `report_decode_us`、`tdx_verify_us`、`tpm_verify_us`），不套用 `/attestation_all` 的 12 项；
-   这符合 §6.6"验证侧不能复用生成侧 schema"的结论。
+3. `/verify-report`、`/parse-report`、`/quote_tpm`、`/information_tpm`、`/verify_all`、`/gpu-attestation`
+   各有自己的 stage 子集（如 `report_decode_us`、`tdx_verify_us`、`tpm_verify_us`、`gpu_attest_us`），
+   不套用 `/attestation_all` 的 12 项；这符合 §6.6"验证侧不能复用生成侧 schema"的结论。
 4. 未实现 §6 的 `env` 上下文块与 `sample_id`/`iter`；文件名列已承担 `sample_id` 的部分职责。
 5. `thread_local` 记录器的作用域是**一次 handler 调用**（同步调用树，无 `.await`），
    请求级数据本身存在 `Request::local_cache`，跨线程迁移不受影响。

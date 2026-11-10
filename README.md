@@ -361,6 +361,7 @@ Two helpers operate on these records:
 ```console
 make bench BENCH_COUNT=100     # N requests, fresh nonce each time (client-side p50/p90/p99)
 make bench-verify              # replay one proof N times against /verify_all
+make bench-gpu                 # N GET /gpu-attestation (each one really runs nvattest)
 make timing-csv                # log/json/*.json -> log/json/summary.csv
 ```
 

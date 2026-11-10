@@ -328,6 +328,12 @@ flowchart TD
 | M63 | 子进程 `sh gpu_local_attest.sh` → `nvattest` | `gpu-attest/gpu_local_attest.sh` | SDK 内部各步骤（证书链拉取、OCSP、RIM 比对）**需在脚本内打点** | P2 |
 | M64 | `gpu::parse_gpu_attestation` | `src/gpu.rs:254` | 文本行解析（`split_once` 逐行，开销很小） | P2 |
 
+> **已落地的部分**（见 `docs/attestation-sample-record-fields.md` §9）：M60 → `gpu_attest_us`（stage）、
+> M62 → `gpu_script_us`（unit，**这一项就是"拿 GPU 报告"的全过程**：`fork/exec` + 预编译的
+> `nvattest` 跑完）、M64 → `gpu_parse_us`（unit）。M63 仍然不可测：`nvattest` 内部的
+> 证书链拉取 / OCSP / RIM 比对发生在子进程里，服务端只看得见进程退出码，
+> 要细分只能在脚本或 SDK 侧自己打时间戳。
+
 ### 4.8 基础设施 / 横切开销
 
 | 编号 | 函数 / 点位 | 位置 | 测什么 | 优先级 |
